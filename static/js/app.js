@@ -348,11 +348,14 @@ async function loadDashboard() {
 
         dashboardData.totalKeywords = totalKeywords;
 
+        // 加载商品总数
+        const totalItems = await loadItemsCount();
+
         // 加载订单看板数据
         const orderMetrics = await loadOrderDashboardMetrics();
 
         // 更新仪表盘显示
-        updateDashboardStats(accountsWithKeywords.length, totalKeywords, enabledAccounts, orderMetrics.totalOrders);
+        updateDashboardStats(accountsWithKeywords.length, totalKeywords, enabledAccounts, totalItems);
         updateDashboardAccountsList(accountsWithKeywords);
     }
     } catch (error) {
@@ -360,6 +363,28 @@ async function loadDashboard() {
     showToast('加载仪表盘数据失败', 'danger');
     } finally {
     toggleLoading(false);
+    }
+}
+
+// 加载商品总数
+async function loadItemsCount() {
+    try {
+        const response = await fetch(`${apiBase}/items`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('获取商品列表失败');
+        }
+
+        const data = await response.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        return items.length;
+    } catch (error) {
+        console.error('加载商品总数失败:', error);
+        return 0;
     }
 }
 
@@ -490,7 +515,6 @@ function updateDashboardOrderMetrics(metrics) {
     const salesAmountEl = document.getElementById('dashboardSalesAmount');
     const completionRateEl = document.getElementById('dashboardCompletionRate');
     const todayOrdersEl = document.getElementById('dashboardTodayOrders');
-    const totalOrdersCardEl = document.getElementById('totalOrders');
 
     if (totalOrdersEl) {
         totalOrdersEl.textContent = metrics.totalOrders;
@@ -510,18 +534,14 @@ function updateDashboardOrderMetrics(metrics) {
     if (todayOrdersEl) {
         todayOrdersEl.textContent = metrics.todayOrders;
     }
-
-    if (totalOrdersCardEl) {
-        totalOrdersCardEl.textContent = metrics.totalOrders;
-    }
 }
 
 // 更新仪表盘统计数据
-function updateDashboardStats(totalAccounts, totalKeywords, enabledAccounts, totalOrders = 0) {
+function updateDashboardStats(totalAccounts, totalKeywords, enabledAccounts, totalItems = 0) {
     document.getElementById('totalAccounts').textContent = totalAccounts;
     document.getElementById('totalKeywords').textContent = totalKeywords;
     document.getElementById('activeAccounts').textContent = enabledAccounts;
-    document.getElementById('totalOrders').textContent = totalOrders;
+    document.getElementById('totalItems').textContent = totalItems;
 }
 
 // 更新仪表盘账号列表
@@ -13870,7 +13890,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.2.8';
+const DEFAULT_VERSION = 'v1.2.9';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -13883,9 +13903,20 @@ let remoteVersionInfo = null;
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.2.8',
+    version: 'v1.2.9',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.2.9',
+            date: '2026-02-26',
+            updates: [
+                '【新功能】仪表盘新增订单数据看板，展示订单总数、销售总金额、订单完成率、当日订单数',
+                '【优化】仪表盘统计卡片将“总订单数”调整为“商品总数”，并同步更新图标与统计逻辑',
+                '【优化】统一订单完成率统计口径（分子：交易成功；分母：待发货+已发货+交易成功+交易关闭）',
+                '【优化】新增订单状态归一化兼容（success/finished、pending_ship/delivered/cancelled）并统一展示',
+                '【修复】将退款中状态文案明确为“申请退款中”，并修正手动发货按钮禁用条件'
+            ]
+        },
         {
             version: 'v1.2.8',
             date: '2026-02-26',
