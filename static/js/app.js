@@ -6550,6 +6550,8 @@ async function loadUserSettings() {
                 if (hex) hex.value = color;
                 applyThemeColor(color);
                 updatePresetSelection(color);
+            } else {
+                localStorage.removeItem('themeColor');
             }
         }
     } catch (error) {
@@ -6570,6 +6572,9 @@ function applyThemeColor(color) {
     // 计算浅色版本（用于某些UI元素）
     const lightColor = adjustBrightness(color, 40);
     document.documentElement.style.setProperty('--primary-light', lightColor);
+
+    // 缓存主题色，供页面首次渲染前预应用，避免刷新闪回默认蓝色
+    localStorage.setItem('themeColor', color);
 }
 
 // 调整颜色亮度
@@ -13755,7 +13760,8 @@ const LOCAL_VERSION_HISTORY = {
                 '【修复】优化侧边栏切换逻辑，避免切换菜单时主内容区出现白屏闪烁',
                 '【修复】优化全局loading遮罩显示策略（延迟展示+并发计数），降低仪表盘和账号管理切换时的闪白感',
                 '【优化】暗色模式可读性增强：提升账号管理扫码按钮提示文案与仪表盘总账号图标的对比度',
-                '【修复】恢复loading出现时的鼠标悬停焦点表现，避免交互反馈丢失'
+                '【修复】恢复loading出现时的鼠标悬停焦点表现，避免交互反馈丢失',
+                '【修复】修复页面刷新时短暂回退默认蓝色主题的问题，首屏优先应用缓存主题色'
             ]
         },
         {
