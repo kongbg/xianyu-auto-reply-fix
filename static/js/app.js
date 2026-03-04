@@ -500,9 +500,66 @@ function updateDashboardSalesMetrics(metrics) {
 
 // 销售额图表实例
 let salesChartInstance = null;
+let currentChartPeriod = null;
+
+// 显示图表加载状态
+function showChartLoading() {
+    const chartContainer = document.querySelector('.chart-container');
+    if (!chartContainer) return;
+    
+    // 添加加载遮罩
+    let loadingOverlay = chartContainer.querySelector('.chart-loading-overlay');
+    if (!loadingOverlay) {
+        loadingOverlay = document.createElement('div');
+        loadingOverlay.className = 'chart-loading-overlay';
+        loadingOverlay.innerHTML = `
+            <div class="chart-loading-spinner">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+                <span class="chart-loading-text">数据加载中...</span>
+            </div>
+        `;
+        chartContainer.style.position = 'relative';
+        chartContainer.appendChild(loadingOverlay);
+    }
+    loadingOverlay.style.display = 'flex';
+}
+
+// 隐藏图表加载状态
+function hideChartLoading() {
+    const loadingOverlay = document.querySelector('.chart-loading-overlay');
+    if (loadingOverlay) {
+        loadingOverlay.style.display = 'none';
+    }
+}
+
+// 更新按钮激活状态
+function updateChartButtonState(activePeriod) {
+    const buttons = document.querySelectorAll('.time-range-selector .btn-group .btn');
+    buttons.forEach(btn => {
+        const btnText = btn.textContent.trim();
+        let btnPeriod = null;
+        
+        if (btnText === '最近1周') btnPeriod = 'week';
+        else if (btnText === '最近1月') btnPeriod = 'month';
+        else if (btnText === '自定义') btnPeriod = 'custom';
+        
+        if (btnPeriod === activePeriod) {
+            btn.classList.remove('btn-outline-primary');
+            btn.classList.add('btn-primary');
+        } else {
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-outline-primary');
+        }
+    });
+}
 
 // 加载销售额图表数据
 async function loadSalesChart(period) {
+    showChartLoading();
+    updateChartButtonState(period);
+    
     try {
         const token = localStorage.getItem('auth_token');
         let startDate, endDate;
@@ -527,10 +584,14 @@ async function loadSalesChart(period) {
 
         const data = await response.json();
         if (data.success && data.data) {
+            currentChartPeriod = period;
             renderSalesChart(data.data.sales, period);
         }
     } catch (error) {
         console.error('加载销售额图表数据失败:', error);
+        showToast('加载销售额数据失败', 'danger');
+    } finally {
+        hideChartLoading();
     }
 }
 
@@ -544,6 +605,14 @@ async function loadCustomSalesChart() {
         return;
     }
 
+    if (new Date(startDate) > new Date(endDate)) {
+        showToast('开始日期不能晚于结束日期', 'warning');
+        return;
+    }
+
+    showChartLoading();
+    updateChartButtonState('custom');
+
     try {
         const token = localStorage.getItem('auth_token');
         const response = await fetch(`/api/sales?start_date=${startDate}&end_date=${endDate}`, {
@@ -554,10 +623,14 @@ async function loadCustomSalesChart() {
 
         const data = await response.json();
         if (data.success && data.data) {
+            currentChartPeriod = 'custom';
             renderSalesChart(data.data.sales, 'custom');
         }
     } catch (error) {
         console.error('加载自定义销售额数据失败:', error);
+        showToast('加载销售额数据失败', 'danger');
+    } finally {
+        hideChartLoading();
     }
 }
 
@@ -575,16 +648,26 @@ function renderSalesChart(salesData, period) {
     const labels = salesData.map(item => item.date);
     const data = salesData.map(item => item.amount);
 
-    // 销毁现有图表
-    if (salesChartInstance) {
-        salesChartInstance.destroy();
-    }
-
     // 创建渐变填充
     const gradient = ctx.createLinearGradient(0, 0, 0, 300);
     gradient.addColorStop(0, 'rgba(0, 123, 255, 0.3)');
     gradient.addColorStop(0.5, 'rgba(0, 123, 255, 0.15)');
     gradient.addColorStop(1, 'rgba(0, 123, 255, 0.02)');
+
+    // 如果图表已存在，使用平滑更新
+    if (salesChartInstance) {
+        // 使用动画更新数据
+        salesChartInstance.data.labels = labels;
+        salesChartInstance.data.datasets[0].data = data;
+        salesChartInstance.data.datasets[0].backgroundColor = gradient;
+        
+        // 更新标题
+        salesChartInstance.options.plugins.title.text = getChartTitle(period);
+        
+        // 平滑过渡更新
+        salesChartInstance.update('active');
+        return;
+    }
 
     // 创建新图表
     salesChartInstance = new Chart(ctx, {
@@ -614,8 +697,16 @@ function renderSalesChart(salesData, period) {
             responsive: true,
             maintainAspectRatio: false,
             animation: {
-                duration: 800,
+                duration: 750,
                 easing: 'easeInOutQuart'
+            },
+            transitions: {
+                active: {
+                    animation: {
+                        duration: 750,
+                        easing: 'easeInOutQuart'
+                    }
+                }
             },
             interaction: {
                 mode: 'index',
