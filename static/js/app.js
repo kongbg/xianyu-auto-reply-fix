@@ -580,6 +580,12 @@ function renderSalesChart(salesData, period) {
         salesChartInstance.destroy();
     }
 
+    // 创建渐变填充
+    const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+    gradient.addColorStop(0, 'rgba(0, 123, 255, 0.3)');
+    gradient.addColorStop(0.5, 'rgba(0, 123, 255, 0.15)');
+    gradient.addColorStop(1, 'rgba(0, 123, 255, 0.02)');
+
     // 创建新图表
     salesChartInstance = new Chart(ctx, {
         type: 'line',
@@ -589,27 +595,54 @@ function renderSalesChart(salesData, period) {
                 label: '销售额',
                 data: data,
                 borderColor: '#007bff',
-                backgroundColor: 'rgba(0, 123, 255, 0.1)',
-                borderWidth: 2,
-                tension: 0.3,
+                backgroundColor: gradient,
+                borderWidth: 3,
+                tension: 0.4,
+                cubicInterpolationMode: 'monotone',
                 fill: true,
                 pointBackgroundColor: '#007bff',
                 pointBorderColor: '#fff',
                 pointBorderWidth: 2,
-                pointRadius: 4,
-                pointHoverRadius: 6
+                pointRadius: 5,
+                pointHoverRadius: 7,
+                pointHoverBackgroundColor: '#0056b3',
+                pointHoverBorderColor: '#fff',
+                pointHoverBorderWidth: 3
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: {
+                duration: 800,
+                easing: 'easeInOutQuart'
+            },
+            interaction: {
+                mode: 'index',
+                intersect: false
+            },
             plugins: {
                 legend: {
                     position: 'top',
+                    labels: {
+                        usePointStyle: true,
+                        padding: 15,
+                        font: {
+                            size: 13,
+                            weight: '500'
+                        }
+                    }
                 },
                 tooltip: {
                     mode: 'index',
                     intersect: false,
+                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                    titleColor: '#fff',
+                    bodyColor: '#fff',
+                    borderColor: '#007bff',
+                    borderWidth: 1,
+                    padding: 12,
+                    displayColors: true,
                     callbacks: {
                         label: function(context) {
                             return `销售额: ￥${context.parsed.y.toFixed(2)}`;
@@ -618,7 +651,14 @@ function renderSalesChart(salesData, period) {
                 },
                 title: {
                     display: true,
-                    text: getChartTitle(period)
+                    text: getChartTitle(period),
+                    font: {
+                        size: 16,
+                        weight: '600'
+                    },
+                    padding: {
+                        bottom: 15
+                    }
                 }
             },
             scales: {
@@ -626,19 +666,42 @@ function renderSalesChart(salesData, period) {
                     display: true,
                     title: {
                         display: true,
-                        text: '日期'
+                        text: '日期',
+                        font: {
+                            size: 12,
+                            weight: '500'
+                        }
+                    },
+                    grid: {
+                        display: false
+                    },
+                    ticks: {
+                        font: {
+                            size: 11
+                        }
                     }
                 },
                 y: {
                     display: true,
                     title: {
                         display: true,
-                        text: '销售额 (￥)'
+                        text: '销售额 (￥)',
+                        font: {
+                            size: 12,
+                            weight: '500'
+                        }
                     },
                     beginAtZero: true,
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.05)',
+                        drawBorder: false
+                    },
                     ticks: {
                         callback: function(value) {
                             return '￥' + value;
+                        },
+                        font: {
+                            size: 11
                         }
                     }
                 }
