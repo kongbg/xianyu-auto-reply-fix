@@ -3,13 +3,12 @@
 更新清单生成工具
 
 此脚本用于生成更新清单，包含所有可更新文件的MD5哈希值和大小信息。
-生成的清单可以用于配置 update_manifest.php
+生成的清单可用于 GitHub Releases + tag 文件热更新方案。
 
 使用方法：
     python generate_update_manifest.py
 
 输出：
-    - 在控制台打印PHP数组格式的文件清单
     - 生成 update_files.json 文件
 """
 
@@ -20,13 +19,17 @@ import hashlib
 from pathlib import Path
 from datetime import datetime
 
+DEFAULT_GITHUB_OWNER = "GuDong2003"
+DEFAULT_GITHUB_REPO = "xianyu-auto-reply-fix"
 
 # 可更新的文件列表（相对路径）
 UPDATABLE_FILES = [
     # 前端文件（不需要重启）
     'static/version.txt',
+    'static/index.html',
     'static/js/app.js',
     # 后端核心文件（需要重启）
+    'auto_updater.py',
     'reply_server.py',
     'XianyuAutoAsync.py',
     'db_manager.py',
@@ -76,7 +79,28 @@ def needs_restart(file_path: str) -> bool:
     return ext not in NO_RESTART_EXTENSIONS
 
 
-def generate_manifest(base_dir: Path, version: str = "v1.0.8") -> dict:
+def build_raw_download_url(owner: str, repo: str, version: str, relative_path: str) -> str:
+    """构建 GitHub raw 文件下载地址"""
+    relative_path = relative_path.replace('\\', '/').lstrip('/')
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{version}/{relative_path}"
+
+
+def read_version(base_dir: Path, fallback: str = "v1.0.0") -> str:
+    """读取版本号"""
+    version_file = base_dir / "static" / "version.txt"
+    if version_file.exists():
+        version = version_file.read_text(encoding='utf-8').strip()
+        if version:
+            return version
+    return fallback
+
+
+def generate_manifest(
+    base_dir: Path,
+    version: str = "v1.0.0",
+    owner: str = DEFAULT_GITHUB_OWNER,
+    repo: str = DEFAULT_GITHUB_REPO
+) -> dict:
     """生成更新清单"""
     files = []
     
@@ -94,6 +118,7 @@ def generate_manifest(base_dir: Path, version: str = "v1.0.8") -> dict:
             'path': file_path.replace('\\', '/'),
             'md5': md5,
             'size': size,
+            'download_url': build_raw_download_url(owner, repo, version, file_path),
             'requires_restart': needs_restart(file_path),
             'description': '',
         })
@@ -104,7 +129,7 @@ def generate_manifest(base_dir: Path, version: str = "v1.0.8") -> dict:
         'description': f'版本 {version} 更新',
         'min_version': 'v1.0.0',
         'changelog': [
-            '热更新功能',
+            'GitHub Releases 热更新清单',
         ],
         'files': files,
     }
@@ -112,32 +137,20 @@ def generate_manifest(base_dir: Path, version: str = "v1.0.8") -> dict:
     return manifest
 
 
-def print_php_array(manifest: dict, base_url: str = "http://116.196.116.76/xianyu/xianyu-update-files"):
-    """打印PHP数组格式"""
+def print_manifest_summary(manifest: dict):
+    """打印清单摘要"""
     print("\n" + "=" * 60)
-    print("PHP 文件清单配置（复制到 update_manifest.php）")
+    print("更新清单摘要")
     print("=" * 60 + "\n")
-    
-    print("$fileManifest = [")
-    for file in manifest['files']:
-        restart_str = 'true' if file['requires_restart'] else 'false'
-        print(f"    [")
-        print(f"        'path' => '{file['path']}',")
-        print(f"        'md5' => '{file['md5']}',")
-        print(f"        'size' => {file['size']},")
-        print(f"        'requires_restart' => {restart_str},")
-        print(f"        'description' => '{file['description']}',")
-        print(f"    ],")
-    print("];")
-    
-    print("\n" + "=" * 60)
-    print("版本信息")
-    print("=" * 60)
+
     print(f"版本号: {manifest['version']}")
     print(f"发布日期: {manifest['release_date']}")
     print(f"文件数量: {len(manifest['files'])}")
     total_size = sum(f['size'] for f in manifest['files'])
     print(f"总大小: {total_size / 1024:.2f} KB")
+    print("示例下载地址:")
+    if manifest['files']:
+        print(f"  {manifest['files'][0]['download_url']}")
 
 
 def main():
@@ -148,15 +161,23 @@ def main():
         base_dir = Path(__file__).parent
     
     # 获取版本号
-    version = "v1.0.8"
+    version = read_version(base_dir)
     if len(sys.argv) > 2:
         version = sys.argv[2]
+
+    owner = DEFAULT_GITHUB_OWNER
+    repo = DEFAULT_GITHUB_REPO
+    if len(sys.argv) > 3:
+        owner = sys.argv[3]
+    if len(sys.argv) > 4:
+        repo = sys.argv[4]
     
     print(f"项目目录: {base_dir}")
     print(f"版本号: {version}")
+    print(f"GitHub 仓库: {owner}/{repo}")
     
     # 生成清单
-    manifest = generate_manifest(base_dir, version)
+    manifest = generate_manifest(base_dir, version, owner, repo)
     
     # 保存JSON文件
     output_file = base_dir / "update_files.json"
@@ -164,33 +185,17 @@ def main():
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     print(f"\n已生成: {output_file}")
     
-    # 打印PHP格式
-    print_php_array(manifest)
+    # 打印摘要
+    print_manifest_summary(manifest)
     
     print("\n" + "=" * 60)
     print("使用说明")
     print("=" * 60)
     print("""
-1. 将上面的 $fileManifest 数组复制到服务器上的 update_manifest.php 文件中
-
-2. 将需要更新的文件上传到服务器的对应目录：
-   http://116.196.116.76/xianyu-update-files/
-   
-   目录结构应该是：
-   xianyu-update-files/
-   ├── static/
-   │   ├── js/
-   │   │   └── app.js
-   │   ├── css/
-   │   │   └── app.css
-   │   └── index.html
-   ├── reply_server.py
-   ├── XianyuAutoAsync.py
-   └── ...
-
-3. 更新 update_manifest.php 中的版本号和更新日志
-
-4. 用户在前端点击"一键热更新"即可自动下载更新
+1. 将当前版本代码提交并打上 Git tag（如 v1.5.0）
+2. 发布 GitHub Release，并确保对应 tag 已存在
+3. 将 update_files.json 一并提交到仓库，使其可通过 tag 的 raw 地址访问
+4. 用户在前端点击"一键热更新"后，会先读取 GitHub Releases 最新版本，再从对应 tag 下载文件
 """)
 
 

@@ -1,44 +1,65 @@
 {
-  "version": "v1.0.8",
-  "release_date": "2025-12-12",
-  "description": "版本 v1.0.8 更新",
+  "version": "v1.5.1",
+  "release_date": "2026-03-10",
+  "description": "版本 v1.5.1 更新",
   "min_version": "v1.0.0",
   "changelog": [
-    "热更新功能"
+    "GitHub Releases 热更新清单"
   ],
   "files": [
     {
       "path": "static/version.txt",
-      "md5": "972ed52d5414e6f055acff4c5fbb2503",
+      "md5": "10ef108dab1175fbe6868ec3ed527201",
       "size": 7,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/static/version.txt",
       "requires_restart": true,
       "description": ""
     },
     {
-      "path": "static/js/app.js",
-      "md5": "99e701269981f0fd349b2b13863d6f73",
-      "size": 480107,
+      "path": "static/index.html",
+      "md5": "d7e4653644a189d83c18eef0367bfc9c",
+      "size": 230730,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/static/index.html",
       "requires_restart": false,
       "description": ""
     },
     {
+      "path": "static/js/app.js",
+      "md5": "39a6e422b41ed2db40ce69bdb6f95bb5",
+      "size": 602011,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/static/js/app.js",
+      "requires_restart": false,
+      "description": ""
+    },
+    {
+      "path": "auto_updater.py",
+      "md5": "b32f3f9b1cc96b948214718b398b5f2b",
+      "size": 31969,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/auto_updater.py",
+      "requires_restart": true,
+      "description": ""
+    },
+    {
       "path": "reply_server.py",
-      "md5": "f0dc1075fd549a431fa9e1c7c2cd97d2",
-      "size": 250566,
+      "md5": "adcdbc5159c242256395319dabf0f42a",
+      "size": 351607,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/reply_server.py",
       "requires_restart": true,
       "description": ""
     },
     {
       "path": "XianyuAutoAsync.py",
-      "md5": "1877d7168dacad910d3e9c2eaff1e537",
-      "size": 511512,
+      "md5": "41bd622890fa68d29c889ecb00e7beec",
+      "size": 601361,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/XianyuAutoAsync.py",
       "requires_restart": true,
       "description": ""
     },
     {
       "path": "db_manager.py",
-      "md5": "bbdf0701a68f18af13b0b21c18a50327",
-      "size": 262519,
+      "md5": "480cb258ec88c68c3820548659e7f06a",
+      "size": 346548,
+      "download_url": "https://raw.githubusercontent.com/GuDong2003/xianyu-auto-reply-fix/v1.5.1/db_manager.py",
       "requires_restart": true,
       "description": ""
     }

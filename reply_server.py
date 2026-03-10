@@ -8347,6 +8347,16 @@ async def check_for_updates(current_user: Dict[str, Any] = Depends(get_current_u
         # 获取需要更新的文件
         files_to_update = await updater.get_files_to_update(manifest)
         total_size = sum(f.size for f in files_to_update)
+
+        if not files_to_update:
+            return {
+                "success": True,
+                "data": {
+                    "has_update": False,
+                    "current_version": updater.current_version,
+                    "message": "已是最新版本"
+                }
+            }
         
         return {
             "success": True,

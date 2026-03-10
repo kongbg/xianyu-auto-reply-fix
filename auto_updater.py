@@ -82,9 +82,12 @@ class UpdateProgress:
 
 class AutoUpdater:
     """自动更新器"""
-    
-    # 默认更新服务器地址
-    DEFAULT_UPDATE_SERVER = "http://116.196.116.76"
+
+    # 默认 GitHub 更新源配置
+    DEFAULT_GITHUB_API_BASE = "https://api.github.com"
+    DEFAULT_GITHUB_RAW_BASE = "https://raw.githubusercontent.com"
+    DEFAULT_GITHUB_OWNER = "GuDong2003"
+    DEFAULT_GITHUB_REPO = "xianyu-auto-reply-fix"
     
     # 可热更新的文件类型（不需要重启）
     HOT_UPDATABLE_EXTENSIONS = {'.js', '.css', '.html', '.json', '.yml', '.yaml'}
@@ -106,17 +109,26 @@ class AutoUpdater:
     def __init__(self, 
                  app_dir: Optional[str] = None,
                  update_server: Optional[str] = None,
+                 github_owner: Optional[str] = None,
+                 github_repo: Optional[str] = None,
+                 github_token: Optional[str] = None,
                  current_version: str = "1.0.0"):
         """
         初始化更新器
         
         Args:
             app_dir: 应用目录，默认为当前工作目录
-            update_server: 更新服务器地址
+            update_server: 兼容旧参数，保留但不再作为默认更新源
+            github_owner: GitHub 仓库 owner
+            github_repo: GitHub 仓库 repo
+            github_token: GitHub API Token（可选，用于提升限额）
             current_version: 当前版本号
         """
         self.app_dir = Path(app_dir) if app_dir else Path.cwd()
-        self.update_server = update_server or self.DEFAULT_UPDATE_SERVER
+        self.github_owner = github_owner or os.getenv("UPDATE_GITHUB_OWNER", self.DEFAULT_GITHUB_OWNER)
+        self.github_repo = github_repo or os.getenv("UPDATE_GITHUB_REPO", self.DEFAULT_GITHUB_REPO)
+        self.github_token = (github_token or os.getenv("UPDATE_GITHUB_TOKEN", "")).strip()
+        self.update_server = update_server or f"{self.github_owner}/{self.github_repo}"
         self.current_version = current_version
         self.backup_dir = self.app_dir / "update_backup"
         
@@ -127,7 +139,10 @@ class AutoUpdater:
         # 确保备份目录存在
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"自动更新器初始化: app_dir={self.app_dir}, server={self.update_server}, version={self.current_version}")
+        logger.info(
+            "自动更新器初始化: "
+            f"app_dir={self.app_dir}, repo={self.github_owner}/{self.github_repo}, version={self.current_version}"
+        )
     
     def add_progress_callback(self, callback: callable):
         """添加进度回调"""
@@ -171,6 +186,55 @@ class AutoUpdater:
         """检查文件更新是否需要重启"""
         ext = Path(file_path).suffix.lower()
         return ext in self.RESTART_REQUIRED_EXTENSIONS
+
+    def _build_request_headers(self, accept_json: bool = True) -> Dict[str, str]:
+        """构建 GitHub 请求头"""
+        headers = {
+            "User-Agent": f"XianyuAutoReplyUpdater/{self.current_version}",
+        }
+        if accept_json:
+            headers["Accept"] = "application/vnd.github+json"
+        if self.github_token:
+            headers["Authorization"] = f"Bearer {self.github_token}"
+        return headers
+
+    def _build_latest_release_url(self) -> str:
+        """构建 GitHub 最新 release API 地址"""
+        return (
+            f"{self.DEFAULT_GITHUB_API_BASE}/repos/"
+            f"{self.github_owner}/{self.github_repo}/releases/latest"
+        )
+
+    def _build_raw_file_url(self, tag: str, relative_path: str) -> str:
+        """构建 GitHub raw 文件地址"""
+        relative_path = relative_path.replace("\\", "/").lstrip("/")
+        return (
+            f"{self.DEFAULT_GITHUB_RAW_BASE}/"
+            f"{self.github_owner}/{self.github_repo}/{tag}/{relative_path}"
+        )
+
+    def _extract_changelog(self, release_data: Dict[str, Any]) -> List[str]:
+        """从 release body 中提取简易更新日志"""
+        body = (release_data.get("body") or "").strip()
+        if not body:
+            return []
+
+        changelog = []
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("- ", "* ", "+ ")):
+                line = line[2:].strip()
+            changelog.append(line)
+        return changelog
+
+    def _find_asset_download_url(self, release_data: Dict[str, Any], asset_name: str) -> Optional[str]:
+        """查找指定 release asset 的浏览器下载地址"""
+        for asset in release_data.get("assets", []) or []:
+            if asset.get("name") == asset_name:
+                return asset.get("browser_download_url")
+        return None
     
     async def check_for_updates(self) -> Optional[UpdateManifest]:
         """
@@ -182,50 +246,77 @@ class AutoUpdater:
         self._update_progress(status=UpdateStatus.CHECKING, message="正在检查更新...")
         
         try:
-            manifest_url = f"{self.update_server}/xianyu/update_manifest.php?version={self.current_version}"
-            
             async with aiohttp.ClientSession() as session:
-                async with session.get(manifest_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                release_url = self._build_latest_release_url()
+                async with session.get(
+                    release_url,
+                    headers=self._build_request_headers(),
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(f"获取 GitHub Release 失败: HTTP {response.status}")
+                        self._update_progress(status=UpdateStatus.IDLE, message="检查更新失败")
+                        return None
+
+                    release_data = await response.json()
+
+                release_tag = (release_data.get("tag_name") or "").strip()
+                if not release_tag:
+                    logger.warning("GitHub Release 缺少 tag_name，无法检查更新")
+                    self._update_progress(status=UpdateStatus.IDLE, message="检查更新失败")
+                    return None
+
+                manifest_url = self._find_asset_download_url(release_data, "update_files.json")
+                if not manifest_url:
+                    manifest_url = self._build_raw_file_url(release_tag, "update_files.json")
+
+                async with session.get(
+                    manifest_url,
+                    headers=self._build_request_headers(accept_json=False),
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
                     if response.status != 200:
                         logger.warning(f"获取更新清单失败: HTTP {response.status}")
                         self._update_progress(status=UpdateStatus.IDLE, message="检查更新失败")
                         return None
-                    
-                    data = await response.json()
-                    
-                    if not data.get('success'):
-                        logger.info(f"没有可用更新: {data.get('message', '未知')}")
-                        self._update_progress(status=UpdateStatus.IDLE, message="已是最新版本")
+
+                    manifest_text = await response.text()
+                    try:
+                        manifest_data = json.loads(manifest_text)
+                    except json.JSONDecodeError as exc:
+                        logger.warning(f"解析更新清单失败: {exc}")
+                        self._update_progress(status=UpdateStatus.IDLE, message="检查更新失败")
                         return None
-                    
-                    manifest_data = data.get('data', {})
-                    
-                    # 解析文件列表
-                    files = []
-                    for file_info in manifest_data.get('files', []):
-                        files.append(FileUpdate(
-                            path=file_info['path'],
-                            md5=file_info['md5'],
-                            size=file_info.get('size', 0),
-                            download_url=file_info['download_url'],
-                            version=file_info.get('version', manifest_data.get('version', '')),
-                            requires_restart=file_info.get('requires_restart', self._needs_restart(file_info['path'])),
-                            description=file_info.get('description', '')
-                        ))
-                    
-                    manifest = UpdateManifest(
-                        version=manifest_data.get('version', ''),
-                        release_date=manifest_data.get('release_date', ''),
-                        description=manifest_data.get('description', ''),
-                        files=files,
-                        min_version=manifest_data.get('min_version', ''),
-                        changelog=manifest_data.get('changelog', [])
-                    )
-                    
-                    logger.info(f"发现新版本: {manifest.version}, 共 {len(files)} 个文件需要更新")
-                    self._update_progress(status=UpdateStatus.IDLE, message=f"发现新版本 {manifest.version}")
-                    
-                    return manifest
+
+                manifest_version = manifest_data.get("version") or release_tag
+                changelog = manifest_data.get("changelog") or self._extract_changelog(release_data)
+
+                files = []
+                for file_info in manifest_data.get("files", []):
+                    file_path = file_info["path"].replace("\\", "/")
+                    files.append(FileUpdate(
+                        path=file_path,
+                        md5=file_info.get("md5", ""),
+                        size=file_info.get("size", 0),
+                        download_url=self._build_raw_file_url(release_tag, file_path),
+                        version=file_info.get("version", manifest_version),
+                        requires_restart=file_info.get("requires_restart", self._needs_restart(file_path)),
+                        description=file_info.get("description", "")
+                    ))
+
+                manifest = UpdateManifest(
+                    version=manifest_version,
+                    release_date=manifest_data.get("release_date") or release_data.get("published_at", ""),
+                    description=manifest_data.get("description") or release_data.get("name") or f"版本 {manifest_version} 更新",
+                    files=files,
+                    min_version=manifest_data.get("min_version", ""),
+                    changelog=changelog
+                )
+
+                logger.info(f"发现发布版本: {manifest.version}, 共 {len(files)} 个文件可用于比对更新")
+                self._update_progress(status=UpdateStatus.IDLE, message=f"已获取版本 {manifest.version} 的更新清单")
+
+                return manifest
                     
         except asyncio.TimeoutError:
             logger.error("检查更新超时")

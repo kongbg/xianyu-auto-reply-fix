@@ -3724,6 +3724,11 @@ async function checkAuth() {
         systemRestartBtn.style.display = 'inline-block';
         }
 
+        const dashboardHotUpdateBtn = document.getElementById('dashboardHotUpdateBtn');
+        if (dashboardHotUpdateBtn) {
+        dashboardHotUpdateBtn.style.display = 'inline-flex';
+        }
+
         // 显示登录与注册设置
         const loginInfoSettings = document.getElementById('login-info-settings');
         if (loginInfoSettings) {
@@ -11559,6 +11564,7 @@ async function loadSystemSettings() {
             const outgoingConfigs = document.getElementById('outgoing-configs');
             const backupManagement = document.getElementById('backup-management');
             const systemRestartBtn = document.getElementById('system-restart-btn');
+            const dashboardHotUpdateBtn = document.getElementById('dashboardHotUpdateBtn');
 
             if (apiSecuritySettings) {
                 apiSecuritySettings.style.display = isAdmin ? 'block' : 'none';
@@ -11575,6 +11581,9 @@ async function loadSystemSettings() {
             if (systemRestartBtn) {
                 systemRestartBtn.style.display = isAdmin ? 'inline-block' : 'none';
             }
+            if (dashboardHotUpdateBtn) {
+                dashboardHotUpdateBtn.style.display = isAdmin ? 'inline-flex' : 'none';
+            }
 
             // 如果是管理员，加载所有管理员设置
             if (isAdmin) {
@@ -11588,8 +11597,12 @@ async function loadSystemSettings() {
         console.error('获取用户信息失败:', error);
         // 出错时隐藏管理员功能
         const loginInfoSettings = document.getElementById('login-info-settings');
+        const dashboardHotUpdateBtn = document.getElementById('dashboardHotUpdateBtn');
         if (loginInfoSettings) {
             loginInfoSettings.style.display = 'none';
+        }
+        if (dashboardHotUpdateBtn) {
+            dashboardHotUpdateBtn.style.display = 'none';
         }
     }
 }
@@ -14870,9 +14883,20 @@ let remoteVersionInfo = null;
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.5.0',
+    version: 'v1.5.1',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.5.1',
+            date: '2026-03-10',
+            updates: [
+                '【新功能】接入 GitHub Releases 在线更新，支持从最新 Release 读取 update_files.json 检查热更新',
+                '【新功能】仪表盘版本区新增管理员可见的“检查更新”入口，可直接执行热更新',
+                '【优化】更新清单解析兼容 GitHub 资产返回 application/octet-stream 的场景，避免检查更新失败',
+                '【优化】版本区样式统一为 badge 视觉，并修复版本号与更新入口的垂直居中显示',
+                '【新功能】新增 GitHub Actions 自动发布工作流，push 到 main 且版本变化后可自动创建 tag 和 Release'
+            ]
+        },
         {
             version: 'v1.5.0',
             date: '2026-03-10',
@@ -15202,41 +15226,31 @@ async function loadSystemVersion() {
             systemVersionBadge.onclick = () => showChangelogModal();
         }
 
-        // 从远程PHP获取版本信息（暂时禁用）
-        // try {
-        //     const response = await fetch(VERSION_CHECK_URL, {
-        //         method: 'GET',
-        //         headers: {
-        //             'Accept': 'application/json'
-        //         }
-        //     });
-        //
-        //     if (!response.ok) {
-        //         console.warn('版本检查请求失败:', response.status);
-        //         return;
-        //     }
-        //
-        //     const result = await response.json();
-        //
-        //     if (result.error || !result.success) {
-        //         console.warn('版本检查返回错误:', result.message);
-        //         return;
-        //     }
-        //
-        //     // 缓存远程版本信息
-        //     remoteVersionInfo = result.data;
-        //
-        //     // 检查是否有更新（版本号不一致）
-        //     if (remoteVersionInfo.version && remoteVersionInfo.version !== LOCAL_VERSION) {
-        //         showUpdateAvailable(remoteVersionInfo.version);
-        //     }
-        //
-        // } catch (fetchError) {
-        //     console.warn('无法连接版本检查服务器:', fetchError.message);
-        // }
-
-        // 使用本地版本历史
-        remoteVersionInfo = LOCAL_VERSION_HISTORY;
+        // 调用后端检查更新（复用热更新接口）
+        try {
+            const response = await fetch('/api/update/check', {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'Authorization': `Bearer ${authToken}`
+                }
+            });
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success && result.data && result.data.has_update) {
+                    remoteVersionInfo = result.data;
+                    // 在绿色"检查更新"按钮上提示有新版本
+                    const dashboardBtn = document.getElementById('dashboardHotUpdateBtn');
+                    if (dashboardBtn) {
+                        dashboardBtn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>有新版本 ' + result.data.new_version;
+                        dashboardBtn.classList.remove('bg-success');
+                        dashboardBtn.classList.add('bg-warning', 'text-dark');
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('版本检查失败:', e.message);
+        }
 
     } catch (error) {
         console.error('版本加载失败:', error);
@@ -15245,76 +15259,26 @@ async function loadSystemVersion() {
 }
 
 /**
- * 显示有更新标签（暂时禁用）
- */
-// function showUpdateAvailable(newVersion) {
-//     const versionContainer = document.querySelector('.version-info');
-//
-//     if (!versionContainer) {
-//         return;
-//     }
-//
-//     // 检查是否已经有更新标签
-//     if (versionContainer.querySelector('.update-badge')) {
-//         return;
-//     }
-//
-//     // 创建更新标签
-//     const updateBadge = document.createElement('span');
-//     updateBadge.className = 'badge bg-warning ms-2 update-badge';
-//     updateBadge.style.cursor = 'pointer';
-//     updateBadge.innerHTML = '<i class="bi bi-arrow-up-circle me-1"></i>有更新';
-//     updateBadge.title = `新版本 ${newVersion} 可用，点击查看更新内容`;
-//
-//     // 点击事件
-//     updateBadge.onclick = () => showUpdateInfo(newVersion);
-//
-//     // 添加到版本信息容器
-//     versionContainer.appendChild(updateBadge);
-// }
-
-/**
  * 获取更新信息（使用缓存或本地版本历史）
  */
 async function getUpdateInfo() {
-    // 如果已有缓存的远程版本信息，直接使用
+    // 如果已有缓存的远程版本信息，映射为前端期望的字段格式
     if (remoteVersionInfo) {
-        return remoteVersionInfo;
+        return {
+            version: remoteVersionInfo.new_version || remoteVersionInfo.version,
+            updates: remoteVersionInfo.changelog || remoteVersionInfo.updates,
+            description: remoteVersionInfo.description,
+            releaseDate: remoteVersionInfo.release_date || remoteVersionInfo.releaseDate,
+            downloadUrl: remoteVersionInfo.downloadUrl,
+            altDownloadUrl: remoteVersionInfo.altDownloadUrl,
+            installMethods: remoteVersionInfo.installMethods,
+            notice: remoteVersionInfo.notice
+        };
     }
 
-    // 使用本地版本历史（远程服务暂时禁用）
+    // 使用本地版本历史作为兜底
     remoteVersionInfo = LOCAL_VERSION_HISTORY;
     return remoteVersionInfo;
-
-    // 远程请求代码（暂时禁用）
-    // try {
-    //     const response = await fetch(VERSION_CHECK_URL, {
-    //         method: 'GET',
-    //         headers: {
-    //             'Accept': 'application/json'
-    //         }
-    //     });
-    //
-    //     if (!response.ok) {
-    //         showToast('获取更新信息失败: 网络错误', 'danger');
-    //         return null;
-    //     }
-    //
-    //     const result = await response.json();
-    //
-    //     if (result.error || !result.success) {
-    //         showToast('获取更新信息失败: ' + (result.message || '未知错误'), 'danger');
-    //         return null;
-    //     }
-    //
-    //     remoteVersionInfo = result.data;
-    //     return remoteVersionInfo;
-    //
-    // } catch (error) {
-    //     console.error('获取更新信息失败:', error);
-    //     showToast('获取更新信息失败: ' + error.message, 'danger');
-    //     return null;
-    // }
 }
 
 /**
@@ -16219,13 +16183,7 @@ async function checkHotUpdate() {
  * 下载并安装所有可用更新
  */
 async function performHotUpdate() {
-    const hotUpdateBtn = document.getElementById('hotUpdateBtn');
-    
-    // 禁用按钮，显示加载状态
-    if (hotUpdateBtn) {
-        hotUpdateBtn.disabled = true;
-        hotUpdateBtn.innerHTML = '<i class="bi bi-arrow-repeat spin me-1"></i>检查更新中...';
-    }
+    setHotUpdateButtonsLoading();
     
     try {
         // 先检查是否有更新
@@ -16306,6 +16264,26 @@ function resetHotUpdateBtn() {
     if (hotUpdateBtn) {
         hotUpdateBtn.disabled = false;
         hotUpdateBtn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>一键热更新';
+    }
+    const dashboardHotUpdateBtn = document.getElementById('dashboardHotUpdateBtn');
+    if (dashboardHotUpdateBtn) {
+        dashboardHotUpdateBtn.disabled = false;
+        dashboardHotUpdateBtn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>检查更新';
+        dashboardHotUpdateBtn.classList.remove('bg-warning', 'text-dark');
+        dashboardHotUpdateBtn.classList.add('bg-success');
+    }
+}
+
+function setHotUpdateButtonsLoading() {
+    const hotUpdateBtn = document.getElementById('hotUpdateBtn');
+    if (hotUpdateBtn) {
+        hotUpdateBtn.disabled = true;
+        hotUpdateBtn.innerHTML = '<i class="bi bi-arrow-repeat spin me-1"></i>检查更新中...';
+    }
+    const dashboardHotUpdateBtn = document.getElementById('dashboardHotUpdateBtn');
+    if (dashboardHotUpdateBtn) {
+        dashboardHotUpdateBtn.disabled = true;
+        dashboardHotUpdateBtn.innerHTML = '<i class="bi bi-arrow-repeat spin me-1"></i>检查更新中...';
     }
 }
 

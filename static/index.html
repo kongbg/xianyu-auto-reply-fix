@@ -216,10 +216,13 @@
             <p class="text-muted mb-0">系统概览和统计信息</p>
           </div>
           <div class="version-info d-flex gap-2">
-            <span class="badge bg-secondary" id="systemVersion" style="cursor: pointer;" onclick="showChangelogModal()" title="点击查看更新日志">
+            <span class="badge bg-secondary d-inline-flex align-items-center" id="systemVersion" style="cursor: pointer; gap: 0.25rem;" onclick="showChangelogModal()" title="点击查看更新日志">
               <i class="bi bi-info-circle me-1"></i>
               版本: <span id="versionNumber">加载中...</span>
             </span>
+            <button type="button" class="badge bg-success border-0 d-inline-flex align-items-center" id="dashboardHotUpdateBtn" style="display: none; cursor: pointer; gap: 0.25rem; padding: 0.45rem 0.75rem; line-height: 1.2;" onclick="performHotUpdate()">
+              <i class="bi bi-cloud-download me-1"></i>检查更新
+            </button>
             <!-- 最新权益功能暂时隐藏
             <span class="badge bg-gradient" id="benefitsBadge" style="cursor: pointer; background: linear-gradient(135deg, #ff6b6b, #feca57, #48dbfb) !important; color: #fff; animation: benefitsGlow 2s ease-in-out infinite;" onclick="showBenefitsModal()">
               <i class="bi bi-gift me-1"></i>
