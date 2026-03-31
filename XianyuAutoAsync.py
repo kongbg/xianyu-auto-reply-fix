@@ -5893,11 +5893,12 @@ class XianyuLive:
             logger.error(f"更新商品详情异常: {self._safe_str(e)}")
             return False
 
-    async def fetch_item_detail_from_api(self, item_id: str) -> str:
+    async def fetch_item_detail_from_api(self, item_id: str, force_refresh: bool = False) -> str:
         """获取商品详情（使用浏览器获取，支持24小时缓存）
 
         Args:
             item_id: 商品ID
+            force_refresh: 是否绕过缓存强制拉取最新详情
 
         Returns:
             str: 商品详情文本，获取失败返回空字符串
@@ -5912,22 +5913,25 @@ class XianyuLive:
                 return ""
 
             # 1. 首先检查缓存（24小时有效）
-            async with self._item_detail_cache_lock:
-                if item_id in self._item_detail_cache:
-                    cache_data = self._item_detail_cache[item_id]
-                    cache_time = cache_data['timestamp']
-                    current_time = time.time()
+            if not force_refresh:
+                async with self._item_detail_cache_lock:
+                    if item_id in self._item_detail_cache:
+                        cache_data = self._item_detail_cache[item_id]
+                        cache_time = cache_data['timestamp']
+                        current_time = time.time()
 
-                    # 检查缓存是否在24小时内
-                    if current_time - cache_time < self._item_detail_cache_ttl:
-                        # 更新访问时间（用于LRU）
-                        cache_data['access_time'] = current_time
-                        logger.info(f"从缓存获取商品详情: {item_id}")
-                        return cache_data['detail']
-                    else:
-                        # 缓存过期，删除
-                        del self._item_detail_cache[item_id]
-                        logger.warning(f"缓存已过期，删除: {item_id}")
+                        # 检查缓存是否在24小时内
+                        if current_time - cache_time < self._item_detail_cache_ttl:
+                            # 更新访问时间（用于LRU）
+                            cache_data['access_time'] = current_time
+                            logger.info(f"从缓存获取商品详情: {item_id}")
+                            return cache_data['detail']
+                        else:
+                            # 缓存过期，删除
+                            del self._item_detail_cache[item_id]
+                            logger.warning(f"缓存已过期，删除: {item_id}")
+            else:
+                logger.info(f"强制刷新商品详情，跳过缓存: {item_id}")
 
             # 2. 尝试使用浏览器获取商品详情
             detail_from_browser = await self._fetch_item_detail_from_browser(item_id)
@@ -6164,11 +6168,12 @@ class XianyuLive:
                 logger.warning(f"停止playwright时出错: {self._safe_str(e)}")
 
 
-    async def save_items_list_to_db(self, items_list):
+    async def save_items_list_to_db(self, items_list, sync_item_details=False):
         """批量保存商品列表信息到数据库（并发安全）
 
         Args:
             items_list: 从get_item_list_info获取的商品列表
+            sync_item_details: 是否同步已存在商品的最新详情
         """
         try:
             from db_manager import db_manager
@@ -6176,7 +6181,7 @@ class XianyuLive:
             # 准备批量数据，区分新商品和需要更新的商品
             batch_new_data = []  # 新商品，保存所有信息
             batch_update_data = []  # 已有商品，只更新标题和价格
-            items_need_detail = []  # 需要获取详情的商品列表
+            items_need_detail = []  # 需要获取或同步详情的商品列表
 
             for item in items_list:
                 item_id = item.get('id')
@@ -6203,7 +6208,7 @@ class XianyuLive:
                 existing_item = db_manager.get_item_info(self.cookie_id, item_id)
                 
                 if existing_item:
-                    # 商品已存在，只更新标题和价格，不更新商品详情
+                    # 商品已存在，先更新标题和价格；商品详情按同步模式单独处理
                     batch_update_data.append({
                         'cookie_id': self.cookie_id,
                         'item_id': item_id,
@@ -6211,6 +6216,11 @@ class XianyuLive:
                         'item_price': item.get('price_text', ''),
                         'item_category': str(item.get('category_id', ''))
                     })
+                    if sync_item_details:
+                        items_need_detail.append({
+                            'item_id': item_id,
+                            'item_title': item.get('title', '')
+                        })
                     logger.debug(f"商品 {item_id} 已存在，将更新标题和价格")
                 else:
                     # 新商品，保存所有信息
@@ -6245,17 +6255,21 @@ class XianyuLive:
                 logger.info(f"更新商品标题和价格: {update_count}/{len(batch_update_data)} 个")
                 saved_count += update_count
 
-            # 异步获取缺失的商品详情（仅新商品）
+            # 异步获取商品详情
             if items_need_detail:
                 from config import config
                 auto_fetch_config = config.get('ITEM_DETAIL', {}).get('auto_fetch', {})
 
                 if auto_fetch_config.get('enabled', True):
-                    logger.info(f"发现 {len(items_need_detail)} 个新商品缺少详情，开始获取...")
-                    detail_success_count = await self._fetch_missing_item_details(items_need_detail)
-                    logger.info(f"成功获取 {detail_success_count}/{len(items_need_detail)} 个商品的详情")
+                    action_text = '同步最新详情' if sync_item_details else '获取缺失详情'
+                    logger.info(f"准备为 {len(items_need_detail)} 个商品{action_text}...")
+                    detail_success_count = await self._fetch_item_details(
+                        items_need_detail,
+                        force_refresh=sync_item_details,
+                    )
+                    logger.info(f"成功为 {detail_success_count}/{len(items_need_detail)} 个商品{action_text}")
                 else:
-                    logger.info(f"发现 {len(items_need_detail)} 个新商品缺少详情，但自动获取功能已禁用")
+                    logger.info(f"有 {len(items_need_detail)} 个商品需要获取详情，但自动获取功能已禁用")
 
             return saved_count
 
@@ -6263,11 +6277,12 @@ class XianyuLive:
             logger.error(f"批量保存商品信息异常: {self._safe_str(e)}")
             return 0
 
-    async def _fetch_missing_item_details(self, items_need_detail):
-        """批量获取缺失的商品详情
+    async def _fetch_item_details(self, items_need_detail, force_refresh=False):
+        """批量获取或同步商品详情
 
         Args:
             items_need_detail: 需要获取详情的商品列表
+            force_refresh: 是否绕过缓存强制拉取最新详情
 
         Returns:
             int: 成功获取详情的商品数量
@@ -6293,7 +6308,10 @@ class XianyuLive:
                         item_title = item_info['item_title']
 
                         # 获取商品详情
-                        item_detail_text = await self.fetch_item_detail_from_api(item_id)
+                        item_detail_text = await self.fetch_item_detail_from_api(
+                            item_id,
+                            force_refresh=force_refresh,
+                        )
 
                         if item_detail_text:
                             # 保存详情到数据库
@@ -13229,13 +13247,14 @@ Cookie数量: {cookie_count}
             self._unregister_instance()
             logger.info(f"【{self.cookie_id}】XianyuLive主程序已完全退出")
 
-    async def get_item_list_info(self, page_number=1, page_size=20, retry_count=0):
+    async def get_item_list_info(self, page_number=1, page_size=20, retry_count=0, sync_item_details=False):
         """获取商品信息，自动处理token失效的情况
 
         Args:
             page_number (int): 页码，从1开始
             page_size (int): 每页数量，默认20
             retry_count (int): 重试次数，内部使用
+            sync_item_details (bool): 是否同步已存在商品的最新详情
         """
         if retry_count >= 4:  # 最多重试3次
             logger.error("获取商品信息失败，重试次数过多")
@@ -13369,7 +13388,10 @@ Cookie数量: {cookie_count}
 
                     # 自动保存商品信息到数据库
                     if items_list:
-                        saved_count = await self.save_items_list_to_db(items_list)
+                        saved_count = await self.save_items_list_to_db(
+                            items_list,
+                            sync_item_details=sync_item_details,
+                        )
                         logger.info(f"已将 {saved_count} 个商品信息保存到数据库")
 
                     return {
@@ -13387,7 +13409,12 @@ Cookie数量: {cookie_count}
                     if 'FAIL_SYS_TOKEN_EXOIRED' in error_msg or 'token' in error_msg.lower():
                         logger.warning(f"Token失效，准备重试: {error_msg}")
                         await asyncio.sleep(0.5)
-                        return await self.get_item_list_info(page_number, page_size, retry_count + 1)
+                        return await self.get_item_list_info(
+                            page_number,
+                            page_size,
+                            retry_count + 1,
+                            sync_item_details=sync_item_details,
+                        )
                     else:
                         logger.error(f"获取商品信息失败: {res_json}")
                         return {"error": f"获取商品信息失败: {error_msg}"}
@@ -13395,14 +13422,20 @@ Cookie数量: {cookie_count}
         except Exception as e:
             logger.error(f"商品信息API请求异常: {self._safe_str(e)}")
             await asyncio.sleep(0.5)
-            return await self.get_item_list_info(page_number, page_size, retry_count + 1)
+            return await self.get_item_list_info(
+                page_number,
+                page_size,
+                retry_count + 1,
+                sync_item_details=sync_item_details,
+            )
 
-    async def get_all_items(self, page_size=20, max_pages=None):
+    async def get_all_items(self, page_size=20, max_pages=None, sync_item_details=False):
         """获取所有商品信息（自动分页）
 
         Args:
             page_size (int): 每页数量，默认20
             max_pages (int): 最大页数限制，None表示无限制
+            sync_item_details (bool): 是否同步已存在商品的最新详情
 
         Returns:
             dict: 包含所有商品信息的字典
@@ -13419,7 +13452,11 @@ Cookie数量: {cookie_count}
                 break
 
             logger.info(f"正在获取第 {page_number} 页...")
-            result = await self.get_item_list_info(page_number, page_size)
+            result = await self.get_item_list_info(
+                page_number,
+                page_size,
+                sync_item_details=sync_item_details,
+            )
 
             if not result.get("success"):
                 logger.error(f"获取第 {page_number} 页失败: {result}")

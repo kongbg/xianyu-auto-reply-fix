@@ -7248,9 +7248,9 @@ async def get_all_items_from_account(request: dict, current_user: Dict[str, Any]
         from XianyuAutoAsync import XianyuLive
         xianyu_instance = XianyuLive(cookies_str, cookie_id)
 
-        # 调用获取所有商品信息的方法（自动分页）
-        logger.info(f"开始获取账号 {cookie_id} 的所有商品信息")
-        result = await xianyu_instance.get_all_items()
+        # 调用获取所有商品信息的方法（自动分页）并同步最新商品详情
+        logger.info(f"开始同步账号 {cookie_id} 的所有商品信息和最新详情")
+        result = await xianyu_instance.get_all_items(sync_item_details=True)
 
         # 关闭session
         await xianyu_instance.close_session()
@@ -7261,10 +7261,10 @@ async def get_all_items_from_account(request: dict, current_user: Dict[str, Any]
         else:
             total_count = result.get('total_count', 0)
             total_pages = result.get('total_pages', 1)
-            logger.info(f"成功获取账号 {cookie_id} 的 {total_count} 个商品（共{total_pages}页）")
+            logger.info(f"成功同步账号 {cookie_id} 的 {total_count} 个商品（共{total_pages}页）")
             return {
                 "success": True,
-                "message": f"成功获取 {total_count} 个商品（共{total_pages}页），详细信息已打印到控制台",
+                "message": f"成功同步 {total_count} 个商品（共{total_pages}页），最新商品详情已更新",
                 "total_count": total_count,
                 "total_pages": total_pages
             }
@@ -7312,9 +7312,9 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
         from XianyuAutoAsync import XianyuLive
         xianyu_instance = XianyuLive(cookies_str, cookie_id)
 
-        # 调用获取指定页商品信息的方法
-        logger.info(f"开始获取账号 {cookie_id} 第{page_number}页商品信息（每页{page_size}条）")
-        result = await xianyu_instance.get_item_list_info(page_number, page_size)
+        # 调用获取指定页商品信息的方法并同步最新商品详情
+        logger.info(f"开始同步账号 {cookie_id} 第{page_number}页商品信息和最新详情（每页{page_size}条）")
+        result = await xianyu_instance.get_item_list_info(page_number, page_size, sync_item_details=True)
 
         # 关闭session
         await xianyu_instance.close_session()
@@ -7324,10 +7324,10 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
             return {"success": False, "message": result['error']}
         else:
             current_count = result.get('current_count', 0)
-            logger.info(f"成功获取账号 {cookie_id} 第{page_number}页 {current_count} 个商品")
+            logger.info(f"成功同步账号 {cookie_id} 第{page_number}页 {current_count} 个商品")
             return {
                 "success": True,
-                "message": f"成功获取第{page_number}页 {current_count} 个商品，详细信息已打印到控制台",
+                "message": f"成功同步第{page_number}页 {current_count} 个商品，最新商品详情已更新",
                 "page_number": page_number,
                 "page_size": page_size,
                 "current_count": current_count

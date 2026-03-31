@@ -673,18 +673,20 @@
                   </div>
                   <div class="d-flex gap-2">
                     <button class="btn btn-success" onclick="getAllItemsFromAccount()">
-                      <i class="bi bi-download me-1"></i>获取指定页
+                      <i class="bi bi-download me-1"></i>同步指定页
                     </button>
                     <button class="btn btn-warning" onclick="getAllItemsFromAccountAll()">
-                      <i class="bi bi-collection me-1"></i>获取所有页
+                      <i class="bi bi-collection me-1"></i>同步所有页
                     </button>
                     <button class="btn btn-primary" onclick="refreshItems()">
-                      <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                      <i class="bi bi-arrow-clockwise me-1"></i>刷新列表
                     </button>
                   </div>
                 </div>
               </div>
             </div>
+
+            <p class="text-muted small mb-0">“同步指定页 / 同步所有页”会从闲鱼拉取最新商品详情；“刷新列表”只重载本地数据库内容。</p>
 
           </div>
         </div>

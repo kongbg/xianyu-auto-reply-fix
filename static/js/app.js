@@ -9060,7 +9060,7 @@ function initItemsSearch() {
 // 刷新商品列表
 async function refreshItems() {
     await refreshItemsData();
-    showToast('商品列表已刷新', 'success');
+    showToast('本地商品列表已刷新', 'success');
 }
 
 // 获取商品信息
@@ -9082,7 +9082,7 @@ async function getAllItemsFromAccount() {
     // 显示加载状态
     const button = event.target;
     const originalText = button.innerHTML;
-    button.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>获取中...';
+    button.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>同步中...';
     button.disabled = true;
 
     try {
@@ -9102,18 +9102,18 @@ async function getAllItemsFromAccount() {
     if (response.ok) {
         const data = await response.json();
         if (data.success) {
-        showToast(`成功获取第${pageNumber}页 ${data.current_count} 个商品，请查看控制台日志`, 'success');
+        showToast(`成功同步第${pageNumber}页 ${data.current_count} 个商品，最新详情已更新`, 'success');
         // 刷新商品列表（保持筛选器选择）
         await refreshItemsData();
         } else {
-        showToast(data.message || '获取商品信息失败', 'danger');
+        showToast(data.message || '同步商品信息失败', 'danger');
         }
     } else {
         throw new Error(`HTTP ${response.status}`);
     }
     } catch (error) {
-    console.error('获取商品信息失败:', error);
-    showToast('获取商品信息失败', 'danger');
+    console.error('同步商品信息失败:', error);
+    showToast('同步商品信息失败', 'danger');
     } finally {
     // 恢复按钮状态
     button.innerHTML = originalText;
@@ -9134,7 +9134,7 @@ async function getAllItemsFromAccountAll() {
     // 显示加载状态
     const button = event.target;
     const originalText = button.innerHTML;
-    button.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>获取中...';
+    button.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>同步中...';
     button.disabled = true;
 
     try {
@@ -9153,20 +9153,20 @@ async function getAllItemsFromAccountAll() {
         const data = await response.json();
         if (data.success) {
         const message = data.total_pages ?
-            `成功获取 ${data.total_count} 个商品（共${data.total_pages}页），请查看控制台日志` :
-            `成功获取商品信息，请查看控制台日志`;
+            `成功同步 ${data.total_count} 个商品（共${data.total_pages}页），最新详情已更新` :
+            `成功同步商品信息，最新详情已更新`;
         showToast(message, 'success');
         // 刷新商品列表（保持筛选器选择）
         await refreshItemsData();
         } else {
-        showToast(data.message || '获取商品信息失败', 'danger');
+        showToast(data.message || '同步商品信息失败', 'danger');
         }
     } else {
         throw new Error(`HTTP ${response.status}`);
     }
     } catch (error) {
-    console.error('获取商品信息失败:', error);
-    showToast('获取商品信息失败', 'danger');
+    console.error('同步商品信息失败:', error);
+    showToast('同步商品信息失败', 'danger');
     } finally {
     // 恢复按钮状态
     button.innerHTML = originalText;
