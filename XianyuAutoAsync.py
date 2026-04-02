@@ -9208,9 +9208,9 @@ Cookie数量: {cookie_count}
             return []
 
     def _can_batch_text_delivery(self, delivery_steps, card_type: str = None) -> bool:
-        """仅将 text/data 的单条纯文本步骤纳入批量合并发送。"""
+        """仅将 text/data/api 的单条纯文本步骤纳入批量合并发送。"""
         normalized_card_type = str(card_type or '').strip().lower()
-        if normalized_card_type not in {'text', 'data'}:
+        if normalized_card_type not in {'text', 'data', 'api'}:
             return False
 
         steps = delivery_steps or []
@@ -9232,12 +9232,12 @@ Cookie数量: {cookie_count}
         return f"{prefix}{content}" if content else prefix
 
     def _apply_delivery_unit_numbering(self, delivery_steps, unit_index: int, total_units: int, card_type: str = None):
-        """为多数量订单中的 text/data 步骤补充序号。"""
+        """为多数量订单中的 text/data/api 步骤补充序号。"""
         if max(1, int(total_units or 1)) <= 1:
             return delivery_steps or []
 
         normalized_card_type = str(card_type or '').strip().lower()
-        if normalized_card_type not in {'text', 'data'}:
+        if normalized_card_type not in {'text', 'data', 'api'}:
             return delivery_steps or []
 
         steps = [dict(step or {}) for step in (delivery_steps or [])]
