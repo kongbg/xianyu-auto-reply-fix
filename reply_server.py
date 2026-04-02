@@ -35,10 +35,11 @@ from utils.time_utils import (
     utc_timestamp_to_local_datetime,
 )
 from utils.notification_dispatcher import (
+    build_face_verify_notification,
     SUPPORTED_NOTIFICATION_TEMPLATE_TYPES,
     dispatch_account_notifications_sync,
-    guess_verification_type,
     render_notification_template,
+    resolve_verification_type_label,
 )
 from order_event_hub import order_event_hub, publish_order_update_event
 
@@ -2597,7 +2598,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
         password_login_sessions[session_id]['slider_instance'] = slider_instance
         
         # 定义通知回调函数，用于检测到人脸认证时返回验证链接或截图（同步函数）
-        def notification_callback(message: str, screenshot_path: str = None, verification_url: str = None, screenshot_path_new: str = None):
+        def notification_callback(
+            message: str,
+            screenshot_path: str = None,
+            verification_url: str = None,
+            screenshot_path_new: str = None,
+            verification_type: str = None,
+        ):
             """人脸认证通知回调（同步）
             
             Args:
@@ -2605,10 +2612,18 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                 screenshot_path: 旧版截图路径（兼容参数）
                 verification_url: 验证链接
                 screenshot_path_new: 新版截图路径（新参数，优先使用）
+                verification_type: 验证类型
             """
             try:
                 # 优先使用新的截图路径参数
                 actual_screenshot_path = screenshot_path_new if screenshot_path_new else screenshot_path
+                verification_type_label = resolve_verification_type_label(
+                    verification_type,
+                    message,
+                    verification_url,
+                )
+                if actual_screenshot_path:
+                    verification_type_label = '人脸验证'
                 
                 # 优先使用截图路径，如果没有截图则使用验证链接
                 if actual_screenshot_path and os.path.exists(actual_screenshot_path):
@@ -2627,12 +2642,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         """在后台线程中发送人脸验证通知"""
                         try:
                             log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
-                            notification_message = render_notification_template(
-                                'face_verify',
+                            notification_message = build_face_verify_notification(
                                 account_id=account_id,
-                                time=time.strftime('%Y-%m-%d %H:%M:%S'),
-                                verification_url='无',
-                                verification_type=guess_verification_type(message, None)
+                                time_text=time.strftime('%Y-%m-%d %H:%M:%S'),
+                                verification_type=verification_type_label,
+                                verification_url=verification_url or '',
+                                error_message=message,
+                                has_screenshot=True,
                             )
                             notification_sent = dispatch_account_notifications_sync(
                                 account_id,
@@ -2672,12 +2688,13 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         """在后台线程中发送人脸验证通知"""
                         try:
                             log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
-                            notification_message = render_notification_template(
-                                'face_verify',
+                            notification_message = build_face_verify_notification(
                                 account_id=account_id,
-                                time=time.strftime('%Y-%m-%d %H:%M:%S'),
+                                time_text=time.strftime('%Y-%m-%d %H:%M:%S'),
+                                verification_type=verification_type_label,
                                 verification_url=verification_url or '无',
-                                verification_type=guess_verification_type(message, verification_url)
+                                error_message=message,
+                                has_screenshot=False,
                             )
                             notification_sent = dispatch_account_notifications_sync(
                                 account_id,

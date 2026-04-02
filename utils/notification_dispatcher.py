@@ -84,6 +84,14 @@ Cookie数量: {cookie_count}
 }
 
 
+VERIFICATION_TYPE_LABELS = {
+    'face_verify': '人脸验证',
+    'sms_verify': '短信验证',
+    'qr_verify': '二维码验证',
+    'unknown': '身份验证',
+}
+
+
 def _safe_str(value: Any) -> str:
     try:
         return str(value)
@@ -161,6 +169,52 @@ def guess_verification_type(error_message: str = '', verification_url: str = '')
     if '二维码' in text or '扫码' in text:
         return '二维码验证'
     return '身份验证'
+
+
+def resolve_verification_type_label(
+    verification_type: str = '',
+    error_message: str = '',
+    verification_url: str = '',
+) -> str:
+    normalized = str(verification_type or '').strip()
+    if normalized in VERIFICATION_TYPE_LABELS:
+        return VERIFICATION_TYPE_LABELS[normalized]
+    if normalized in VERIFICATION_TYPE_LABELS.values():
+        return normalized
+    return guess_verification_type(error_message, verification_url)
+
+
+def build_face_verify_notification(
+    account_id: str,
+    time_text: str,
+    *,
+    verification_type: str = '',
+    verification_url: str = '',
+    error_message: str = '',
+    has_screenshot: bool = False,
+) -> str:
+    verification_type_label = resolve_verification_type_label(
+        verification_type,
+        error_message,
+        verification_url,
+    )
+
+    if has_screenshot:
+        return (
+            f"⚠️ 需要{verification_type_label} 🚫\n"
+            f"在验证期间，发货及自动回复暂时无法使用。\n\n"
+            f"请在自动化网站的账号管理弹窗中扫描二维码完成验证。\n\n"
+            f"账号: {account_id}\n"
+            f"时间: {time_text}"
+        )
+
+    return render_notification_template(
+        'face_verify',
+        account_id=account_id,
+        time=time_text,
+        verification_url=verification_url or '无',
+        verification_type=verification_type_label,
+    )
 
 
 async def _send_qq_notification(config_data: Dict[str, Any], message: str, *, account_id: str = '') -> bool:

@@ -2278,7 +2278,17 @@ class XianyuSliderStealth:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(notification_callback(notification_msg, screenshot_path, frame_url))
+                        try:
+                            loop.run_until_complete(
+                                notification_callback(
+                                    notification_msg,
+                                    screenshot_path,
+                                    frame_url,
+                                    verification_type=verification_type,
+                                )
+                            )
+                        except TypeError:
+                            loop.run_until_complete(notification_callback(notification_msg, screenshot_path, frame_url))
                         logger.info(f"【{self.pure_user_id}】✅ 异步通知回调已执行")
                     except Exception as async_err:
                         logger.error(f"【{self.pure_user_id}】异步通知回调执行失败: {async_err}")
@@ -2291,7 +2301,16 @@ class XianyuSliderStealth:
                 thread.start()
                 logger.info(f"【{self.pure_user_id}】异步通知线程已启动")
             else:
-                notification_callback(notification_msg, None, frame_url, screenshot_path)
+                try:
+                    notification_callback(
+                        notification_msg,
+                        None,
+                        frame_url,
+                        screenshot_path,
+                        verification_type=verification_type,
+                    )
+                except TypeError:
+                    notification_callback(notification_msg, None, frame_url, screenshot_path)
                 logger.info(f"【{self.pure_user_id}】✅ 同步通知回调已执行")
         except Exception as notify_err:
             logger.error(f"【{self.pure_user_id}】发送验证通知失败: {notify_err}")
