@@ -2555,6 +2555,8 @@ def _empty_slider_session_stats() -> Dict[str, Any]:
         'accounts_with_failures': 0,
         'stats_mode': 'session',
         'summary_text': '暂无滑块验证记录',
+        'selected_range': 'all',
+        'range_label': '所有',
     }
 
 async def _execute_password_login(session_id: str, account_id: str, account: str, password: str, show_browser: bool, user_id: int, current_user: Dict[str, Any]):
@@ -7170,12 +7172,21 @@ async def get_risk_control_logs(
 @app.get("/admin/slider-verification-stats")
 async def get_slider_verification_stats(
     cookie_id: str = None,
+    range_key: str = 'all',
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
     """获取当前系统用户下的滑块验证统计。"""
     try:
         user_id = admin_user['user_id']
         user_cookie_ids = sorted(db_manager.get_all_cookies(user_id).keys())
+        normalized_range = str(range_key or '').strip().lower()
+        if normalized_range not in {'today', '7d', 'all'}:
+            normalized_range = 'all'
+        range_label = {
+            'today': '当日',
+            '7d': '近 7 天',
+            'all': '所有',
+        }[normalized_range]
 
         if cookie_id:
             if cookie_id not in user_cookie_ids:
@@ -7185,6 +7196,9 @@ async def get_slider_verification_stats(
                         **_empty_slider_session_stats(),
                         'scope_label': cookie_id,
                         'selected_cookie_id': cookie_id,
+                        'selected_range': normalized_range,
+                        'range_label': range_label,
+                        'summary_text': '暂无滑块验证记录' if normalized_range == 'all' else f'{range_label}暂无滑块验证记录',
                     }
                 }
             target_cookie_ids = [cookie_id]
@@ -7193,7 +7207,7 @@ async def get_slider_verification_stats(
             target_cookie_ids = user_cookie_ids
             scope_label = '全部账号'
 
-        stats = db_manager.get_slider_verification_session_stats(target_cookie_ids)
+        stats = db_manager.get_slider_verification_session_stats(target_cookie_ids, range_key=normalized_range)
         stats.update({
             'scope_label': scope_label,
             'selected_cookie_id': cookie_id or '',
@@ -7201,7 +7215,7 @@ async def get_slider_verification_stats(
 
         log_with_user(
             'info',
-            f"获取滑块验证统计成功: scope={scope_label}, sessions={stats['total_sessions']}, success={stats['success_count']}, failure={stats['failure_count']}",
+            f"获取滑块验证统计成功: scope={scope_label}, range={range_label}, sessions={stats['total_sessions']}, success={stats['success_count']}, failure={stats['failure_count']}",
             admin_user,
         )
 

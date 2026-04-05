@@ -10,7 +10,7 @@ import re
 import aiohttp
 import io
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 from typing import List, Tuple, Dict, Optional, Any
 from urllib.parse import parse_qs, urlparse
@@ -8327,7 +8327,7 @@ Cookie数量: {cookie_count}
             logger.error(f"获取风控日志数量失败: {e}")
             return 0
 
-    def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_slider_verification_session_stats(self, cookie_ids: Optional[List[str]] = None, range_key: str = 'all') -> Dict[str, Any]:
         """获取滑块验证会话级统计数据。"""
         empty_stats = {
             'has_data': False,
@@ -8344,6 +8344,8 @@ Cookie数量: {cookie_count}
             'accounts_with_failures': 0,
             'stats_mode': 'session',
             'summary_text': '暂无滑块验证记录',
+            'selected_range': 'all',
+            'range_label': '所有',
         }
 
         def _normalize_cookie_ids(values: Optional[List[str]]) -> Optional[List[str]]:
@@ -8364,10 +8366,39 @@ Cookie数量: {cookie_count}
                 return None
             return text[:16]
 
+        def _normalize_range(value: Any) -> str:
+            text = str(value or '').strip().lower()
+            if text in {'today', '7d', 'all'}:
+                return text
+            return 'all'
+
+        def _build_range_filter(value: str) -> Tuple[List[str], List[Any], str]:
+            normalized = _normalize_range(value)
+            label_map = {
+                'today': '当日',
+                '7d': '近 7 天',
+                'all': '所有',
+            }
+            if normalized == 'all':
+                return [], [], label_map[normalized]
+
+            beijing_tz = timezone(timedelta(hours=8))
+            now_local = datetime.now(beijing_tz)
+            days_back = 0 if normalized == 'today' else 6
+            start_local = (now_local - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
+            start_utc = start_local.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            return ["datetime(created_at) >= datetime(?)"], [start_utc], label_map[normalized]
+
         try:
             normalized_cookie_ids = _normalize_cookie_ids(cookie_ids)
+            normalized_range = _normalize_range(range_key)
             if cookie_ids is not None and not normalized_cookie_ids:
-                return dict(empty_stats)
+                empty_result = dict(empty_stats)
+                empty_result.update({
+                    'selected_range': normalized_range,
+                    'range_label': _build_range_filter(normalized_range)[2],
+                })
+                return empty_result
 
             with self.lock:
                 cursor = self.conn.cursor()
@@ -8379,6 +8410,10 @@ Cookie数量: {cookie_count}
                     placeholders = ', '.join(['?'] * len(normalized_cookie_ids))
                     scope_conditions.append(f"cookie_id IN ({placeholders})")
                     scope_params.extend(normalized_cookie_ids)
+
+                range_conditions, range_params, range_label = _build_range_filter(normalized_range)
+                scope_conditions.extend(range_conditions)
+                scope_params.extend(range_params)
 
                 where_clause = ''
                 if scope_conditions:
@@ -8427,9 +8462,12 @@ Cookie数量: {cookie_count}
                     return _format_datetime_text(row[0] if row else None)
 
                 if total_sessions > 0:
-                    summary_text = '已包含历史滑块成功/失败，并将账密刷新中的滑块失败计入失败次数'
+                    if normalized_range == 'all':
+                        summary_text = '已包含全部时间的滑块成功/失败，并将账密刷新中的滑块失败计入失败次数'
+                    else:
+                        summary_text = f'已按{range_label}范围统计滑块成功/失败，并将账密刷新中的滑块失败计入失败次数'
                 else:
-                    summary_text = '暂无滑块验证记录'
+                    summary_text = '暂无滑块验证记录' if normalized_range == 'all' else f'{range_label}暂无滑块验证记录'
 
                 return {
                     'has_data': total_sessions > 0,
@@ -8446,10 +8484,20 @@ Cookie数量: {cookie_count}
                     'accounts_with_failures': accounts_with_sessions,
                     'stats_mode': 'session',
                     'summary_text': summary_text,
+                    'selected_range': normalized_range,
+                    'range_label': range_label,
                 }
         except Exception as e:
             logger.error(f"获取滑块验证统计失败: {e}")
-            return dict(empty_stats)
+            empty_result = dict(empty_stats)
+            normalized_range = str(range_key or '').strip().lower()
+            if normalized_range in {'today', '7d'}:
+                empty_result.update({
+                    'selected_range': normalized_range,
+                    'range_label': '当日' if normalized_range == 'today' else '近 7 天',
+                    'summary_text': '当日暂无滑块验证记录' if normalized_range == 'today' else '近 7 天暂无滑块验证记录',
+                })
+            return empty_result
 
     def delete_risk_control_log(self, log_id: int) -> bool:
         """
