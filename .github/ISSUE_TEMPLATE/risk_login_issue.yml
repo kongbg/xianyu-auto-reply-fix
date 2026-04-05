@@ -2,7 +2,7 @@ name: 风控 / 登录问题
 description: 反馈滑块、人脸、二维码、Cookie、Session、Token、风控相关问题
 title: "[风控/登录] "
 labels:
-  - bug
+  - 缺陷
 body:
   - type: markdown
     attributes:

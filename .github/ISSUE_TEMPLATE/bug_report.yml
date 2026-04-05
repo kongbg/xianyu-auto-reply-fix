@@ -2,7 +2,7 @@ name: Bug 反馈
 description: 反馈程序异常、功能失效或行为回归
 title: "[Bug] "
 labels:
-  - bug
+  - 缺陷
 body:
   - type: markdown
     attributes:
