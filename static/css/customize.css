@@ -1,0 +1,8 @@
+/* 隐藏卡片悬停向上位移效果 */
+.card {
+  transition: none!important;
+}
+/* 隐藏卡片悬停向上位移效果 */
+.card:hover {
+  transform: none!important;
+}

@@ -135,6 +135,8 @@ class AutoUpdater:
         'Dockerfile-cn',
         'docker-compose.yml',
         'docker-compose-cn.yml',
+        'auto_updater.py',
+        '/static/css/app.css'
     }
     
     def __init__(self, 
