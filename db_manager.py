@@ -1888,30 +1888,39 @@ Cookie数量: {cookie_count}
     
     # -------------------- Cookie操作 --------------------
     def save_cookie(self, cookie_id: str, cookie_value: str, user_id: int = None) -> bool:
-        """保存Cookie到数据库，如存在则更新"""
+        """保存Cookie到数据库；已有记录仅更新Cookie值和用户绑定，保留其他账号字段"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
 
-                # 如果没有提供user_id，尝试从现有记录获取，否则使用admin用户ID
+                self._execute_sql(cursor, "SELECT user_id FROM cookies WHERE id = ?", (cookie_id,))
+                existing = cursor.fetchone()
+
+                # 如果没有提供user_id，优先沿用现有绑定，否则回落到admin用户
                 if user_id is None:
-                    self._execute_sql(cursor, "SELECT user_id FROM cookies WHERE id = ?", (cookie_id,))
-                    existing = cursor.fetchone()
                     if existing:
                         user_id = existing[0]
                     else:
-                        # 获取admin用户ID作为默认值
                         self._execute_sql(cursor, "SELECT id FROM users WHERE username = 'admin'")
                         admin_user = cursor.fetchone()
                         user_id = admin_user[0] if admin_user else 1
 
-                self._execute_sql(cursor,
-                    "INSERT OR REPLACE INTO cookies (id, value, user_id) VALUES (?, ?, ?)",
-                    (cookie_id, self._encrypt_secret(cookie_value), user_id)
-                )
+                encrypted_cookie_value = self._encrypt_secret(cookie_value)
+                if existing:
+                    self._execute_sql(cursor,
+                        "UPDATE cookies SET value = ?, user_id = ? WHERE id = ?",
+                        (encrypted_cookie_value, user_id, cookie_id)
+                    )
+                    action = "更新"
+                else:
+                    self._execute_sql(cursor,
+                        "INSERT INTO cookies (id, value, user_id) VALUES (?, ?, ?)",
+                        (cookie_id, encrypted_cookie_value, user_id)
+                    )
+                    action = "创建"
 
                 self.conn.commit()
-                logger.info(f"Cookie保存成功: {cookie_id} (用户ID: {user_id})")
+                logger.info(f"Cookie{action}成功: {cookie_id} (用户ID: {user_id})")
 
                 # 验证保存结果
                 self._execute_sql(cursor, "SELECT user_id FROM cookies WHERE id = ?", (cookie_id,))
