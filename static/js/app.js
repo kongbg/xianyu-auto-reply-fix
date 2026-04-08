@@ -14121,7 +14121,7 @@ function renderOrderHistorySyncJob(job) {
         progressPercent = 100;
     } else if (accountsTotal > 0) {
         const accountProgress = accountsCompleted / accountsTotal;
-        const orderProgress = ordersDiscovered > 0 ? (ordersProcessed / ordersDiscovered) : 0;
+        const orderProgress = matchedOrders > 0 ? (ordersProcessed / matchedOrders) : 0;
         progressPercent = Math.max(accountProgress, orderProgress) * 100;
     } else if (status === 'pending') {
         progressPercent = 8;
@@ -14147,7 +14147,7 @@ function renderOrderHistorySyncJob(job) {
 
     const requestParts = [
         request.cookie_id ? `账号 ${request.cookie_id}` : '全部账号',
-        request.max_orders ? `最多 ${request.max_orders} 单` : '',
+        request.max_orders ? `最多同步 ${request.max_orders} 单` : '',
         request.fetch_details === false ? '仅基础信息' : '含订单详情',
         request.start_date && request.end_date ? `时间范围 ${request.start_date} 至 ${request.end_date}` : '',
     ].filter(Boolean);
@@ -14171,6 +14171,9 @@ function renderOrderHistorySyncJob(job) {
         currentParts.push(`已处理 ${ordersProcessed} 单，跳过 ${ordersSkipped} 单`);
     }
     if (currentText) {
+        if (matchedOrders > 0 && ordersProcessed > 0) {
+            currentParts.unshift(`范围内进度: ${ordersProcessed} / ${matchedOrders}`);
+        }
         currentText.textContent = currentParts.join(' · ');
     }
 
@@ -14263,7 +14266,7 @@ async function startOrderHistorySync() {
             return;
         }
         if (!Number.isFinite(maxOrders) || maxOrders < 1 || maxOrders > 500) {
-            showToast('最多抓取单数需在 1 到 500 之间', 'warning');
+            showToast('最多同步单数需在 1 到 500 之间', 'warning');
             return;
         }
 

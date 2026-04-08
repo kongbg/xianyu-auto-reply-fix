@@ -6,7 +6,7 @@ import aiohttp
 from loguru import logger
 
 from utils.order_detail_fetcher import OrderDetailFetcher
-from utils.time_utils import parse_local_datetime_text_to_db_utc
+from utils.time_utils import parse_db_timestamp, parse_local_datetime_text_to_db_utc
 from utils.xianyu_utils import generate_sign, trans_cookies
 
 
@@ -15,6 +15,11 @@ ORDER_LIST_API_NAME = 'mtop.taobao.idle.trade.merchant.sold.get'
 ORDER_LIST_REFERER = 'https://seller.goofish.com/?site=COMMONPRO#/seller-trade/order-manage'
 ORDER_LIST_QUERY_CODE = 'ALL'
 DEFAULT_PAGE_SIZE = 20
+ORDER_HISTORY_ANCHOR_FIELDS = (
+    'platform_paid_at',
+    'platform_created_at',
+    'platform_completed_at',
+)
 
 ORDER_STATUS_ALIASES = {
     'processing': 'processing',
@@ -65,6 +70,37 @@ def normalize_history_amount(value: Any) -> Optional[str]:
         return f"{float(cleaned):.2f}"
     except (TypeError, ValueError):
         return None
+
+
+def resolve_order_history_anchor_time(candidate: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(candidate, dict):
+        return None
+
+    for field_name in ORDER_HISTORY_ANCHOR_FIELDS:
+        value = str(candidate.get(field_name) or '').strip()
+        if value:
+            return value
+    return None
+
+
+def classify_order_history_range(
+    anchor_time: Optional[str],
+    utc_start: Optional[str] = None,
+    utc_end_exclusive: Optional[str] = None,
+) -> str:
+    if not utc_start or not utc_end_exclusive:
+        return 'in_range'
+
+    anchor_dt = parse_db_timestamp(anchor_time) if anchor_time else None
+    start_dt = parse_db_timestamp(utc_start)
+    end_dt = parse_db_timestamp(utc_end_exclusive)
+    if not anchor_dt or not start_dt or not end_dt:
+        return 'unknown'
+    if anchor_dt < start_dt:
+        return 'before'
+    if anchor_dt >= end_dt:
+        return 'after'
+    return 'in_range'
 
 
 def _cookie_dict_to_string(cookies_dict: Dict[str, str]) -> str:
@@ -293,20 +329,38 @@ class OrderHistoryPageFetcher:
         self.session = None
         await self.fetcher.close()
 
-    async def fetch_recent_orders(self, max_orders: int = 100, max_scroll_rounds: int = 12) -> List[Dict[str, Any]]:
+    async def fetch_recent_orders(
+        self,
+        max_orders: int = 100,
+        max_scroll_rounds: int = 12,
+        utc_start: Optional[str] = None,
+        utc_end_exclusive: Optional[str] = None,
+    ) -> Dict[str, Any]:
         del max_scroll_rounds
 
         if max_orders <= 0:
-            return []
+            return {
+                'orders': [],
+                'scanned_count': 0,
+                'matched_count': 0,
+                'out_of_range_count': 0,
+                'pages_scanned': 0,
+                'stopped_by_range': False,
+            }
 
         await self.open()
 
         captured_orders: List[Dict[str, Any]] = []
         seen_order_ids = set()
         page_number = 1
+        scanned_count = 0
+        out_of_range_count = 0
+        pages_scanned = 0
+        stopped_by_range = False
 
         while len(captured_orders) < max_orders:
             response_json = await self._request_order_page(page_number)
+            pages_scanned += 1
             module = ((response_json.get('data') or {}).get('module') or {})
             items = module.get('items') or []
             next_page = str(module.get('nextPage') or '').lower() == 'true'
@@ -314,6 +368,12 @@ class OrderHistoryPageFetcher:
 
             if not isinstance(items, list):
                 items = []
+
+            page_scanned_count = 0
+            page_in_range_count = 0
+            page_before_count = 0
+            page_after_count = 0
+            page_unknown_count = 0
 
             for raw_item in items:
                 candidate = self._normalize_order_candidate(raw_item)
@@ -325,21 +385,60 @@ class OrderHistoryPageFetcher:
                     continue
 
                 seen_order_ids.add(order_id)
-                captured_orders.append(candidate)
+                scanned_count += 1
+                page_scanned_count += 1
+
+                anchor_time = resolve_order_history_anchor_time(candidate)
+                range_status = classify_order_history_range(anchor_time, utc_start=utc_start, utc_end_exclusive=utc_end_exclusive)
+                if range_status == 'in_range':
+                    captured_orders.append(candidate)
+                    page_in_range_count += 1
+                else:
+                    out_of_range_count += 1
+                    if range_status == 'before':
+                        page_before_count += 1
+                    elif range_status == 'after':
+                        page_after_count += 1
+                    else:
+                        page_unknown_count += 1
+
                 if len(captured_orders) >= max_orders:
                     break
 
             logger.info(
                 f"【{self.cookie_id_for_log}】历史订单列表第 {page_number} 页抓取完成: "
-                f"page_items={len(items)}, captured={len(captured_orders)}, totalCount={total_count}, nextPage={next_page}"
+                f"page_items={len(items)}, scanned={page_scanned_count}, in_range={page_in_range_count}, "
+                f"before_range={page_before_count}, after_range={page_after_count}, unknown_anchor={page_unknown_count}, "
+                f"captured={len(captured_orders)}, totalCount={total_count}, nextPage={next_page}"
             )
 
             if len(captured_orders) >= max_orders or not next_page or not items:
                 break
 
+            if (
+                utc_start and utc_end_exclusive
+                and page_scanned_count > 0
+                and page_in_range_count == 0
+                and page_unknown_count == 0
+                and page_before_count == page_scanned_count
+            ):
+                stopped_by_range = True
+                logger.info(
+                    f"【{self.cookie_id_for_log}】历史订单列表在第 {page_number} 页已全部早于开始时间，停止继续翻页"
+                )
+                break
+
             page_number += 1
 
-        return captured_orders[:max_orders]
+        matched_orders = captured_orders[:max_orders]
+        return {
+            'orders': matched_orders,
+            'scanned_count': scanned_count,
+            'matched_count': len(matched_orders),
+            'out_of_range_count': out_of_range_count,
+            'pages_scanned': pages_scanned,
+            'stopped_by_range': stopped_by_range,
+        }
 
     async def fetch_order_detail(self, order_id: str, force_refresh: bool = True) -> Optional[Dict[str, Any]]:
         return await self.fetcher.fetch_order_detail(order_id, force_refresh=force_refresh)

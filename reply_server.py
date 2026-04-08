@@ -8890,15 +8890,6 @@ def _cleanup_order_history_sync_jobs() -> None:
         order_history_sync_tasks.pop(job_id, None)
 
 
-def _is_history_order_in_range(anchor_time: Optional[str], utc_start: str, utc_end_exclusive: str) -> bool:
-    anchor_dt = parse_db_timestamp(anchor_time) if anchor_time else None
-    start_dt = parse_db_timestamp(utc_start)
-    end_dt = parse_db_timestamp(utc_end_exclusive)
-    if not anchor_dt or not start_dt or not end_dt:
-        return False
-    return start_dt <= anchor_dt < end_dt
-
-
 def _save_history_order_candidate(cookie_id: str, candidate: Dict[str, Any]) -> bool:
     order_status = _normalize_history_optional_text(candidate.get('order_status'))
     normalized_status = normalize_order_status_value(order_status) if order_status else None
@@ -9003,7 +8994,7 @@ async def _run_order_history_sync_job(job_id: str) -> None:
             if job.get('status') == 'cancelled':
                 return
 
-            remaining_limit = max_orders - int(job.get('orders_discovered') or 0)
+            remaining_limit = max_orders - int(job.get('matched_orders') or 0)
             if remaining_limit <= 0:
                 break
 
@@ -9021,8 +9012,19 @@ async def _run_order_history_sync_job(job_id: str) -> None:
             live_instance = cookie_manager.manager.get_xianyu_instance(cookie_id) if cookie_manager.manager else None
 
             try:
-                candidates = await history_fetcher.fetch_recent_orders(max_orders=remaining_limit)
-                job['orders_discovered'] += len(candidates)
+                fetch_result = await history_fetcher.fetch_recent_orders(
+                    max_orders=remaining_limit,
+                    utc_start=utc_start,
+                    utc_end_exclusive=utc_end_exclusive,
+                )
+                candidates = list(fetch_result.get('orders') or [])
+                scanned_count = int(fetch_result.get('scanned_count') or 0)
+                matched_count = int(fetch_result.get('matched_count') or 0)
+                out_of_range_count = int(fetch_result.get('out_of_range_count') or 0)
+
+                job['orders_discovered'] += scanned_count
+                job['matched_orders'] += matched_count
+                job['orders_skipped'] += out_of_range_count
 
                 if live_instance is not None:
                     await history_fetcher.close()
@@ -9031,7 +9033,10 @@ async def _run_order_history_sync_job(job_id: str) -> None:
                     return
 
                 if not candidates:
-                    _append_order_history_sync_warning(job, f'账号 {cookie_id} 未抓到历史订单候选')
+                    if scanned_count > 0 and out_of_range_count > 0:
+                        _append_order_history_sync_warning(job, f'账号 {cookie_id} 未命中时间范围内的历史订单')
+                    else:
+                        _append_order_history_sync_warning(job, f'账号 {cookie_id} 未抓到历史订单候选')
                     job['accounts_completed'] = account_index
                     continue
 
@@ -9043,14 +9048,7 @@ async def _run_order_history_sync_job(job_id: str) -> None:
                     if not order_id:
                         continue
 
-                    candidate_anchor_time = _normalize_history_optional_text(candidate.get('platform_created_at'))
-                    in_range = _is_history_order_in_range(candidate_anchor_time, utc_start, utc_end_exclusive)
-                    if not in_range:
-                        job['orders_skipped'] += 1
-                        continue
-
                     job['current_order_id'] = order_id
-                    job['matched_orders'] += 1
                     job['orders_processed'] += 1
                     job['message'] = f'正在同步账号 {cookie_id} 的订单 {order_id}'
 
@@ -9096,7 +9094,7 @@ async def _run_order_history_sync_job(job_id: str) -> None:
 
         job['status'] = 'completed'
         job['message'] = (
-            f"历史订单同步完成，共发现 {job.get('orders_discovered', 0)} 单，"
+            f"历史订单同步完成，共扫描 {job.get('orders_discovered', 0)} 单，"
             f"命中时间范围 {job.get('matched_orders', 0)} 单，入库/更新 {job.get('orders_saved', 0)} 单"
         )
     except asyncio.CancelledError:
