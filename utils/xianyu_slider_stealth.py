@@ -2165,16 +2165,251 @@ class XianyuSliderStealth:
             pass
         return False
 
+    def _get_password_login_selectors(self) -> Dict[str, List[str]]:
+        return {
+            'account': [
+                '#fm-login-id',
+                'input[name="fm-login-id"]',
+                'input[placeholder*="手机号"]',
+                'input[placeholder*="手机"]',
+                'input[placeholder*="邮箱"]',
+                'input[placeholder*="账号"]',
+                '.fm-login-id',
+                '#J_LoginForm input[type="text"]',
+                '#TPL_username_1',
+            ],
+            'password': [
+                '#fm-login-password',
+                'input[name="fm-login-password"]',
+                'input[type="password"]',
+                'input[placeholder*="密码"]',
+                '#TPL_password_1',
+            ],
+            'submit': [
+                'button.password-login',
+                '.fm-button.fm-submit.password-login',
+                '.password-login',
+                'button.fm-submit',
+                'text=登录',
+            ],
+            'tab': [
+                'a.password-login-tab-item',
+                '.password-login-tab-item',
+                'text=密码登录',
+                'text=账号密码登录',
+            ],
+            'agreement': [
+                '#fm-agreement-checkbox',
+                'input[type="checkbox"]',
+            ],
+        }
+
+    def _query_first_visible(self, frame, selectors: List[str]):
+        if not frame:
+            return None, None
+
+        for selector in selectors:
+            try:
+                element = frame.query_selector(selector)
+                if element and element.is_visible():
+                    return element, selector
+            except Exception:
+                continue
+
+        return None, None
+
+    def _probe_login_form_state(self, frame) -> Dict[str, Any]:
+        """探测当前 frame 是否具备真正可交互的账密登录表单。"""
+        if not frame:
+            return {
+                'is_login_form': False,
+                'probe_type': 'missing',
+                'matched_selector': None,
+                'matched_text': None,
+            }
+
+        selectors = self._get_password_login_selectors()
+        account_input, account_selector = self._query_first_visible(frame, selectors['account'])
+        if account_input:
+            return {
+                'is_login_form': True,
+                'probe_type': 'account_input',
+                'matched_selector': account_selector,
+                'matched_text': None,
+            }
+
+        password_input, password_selector = self._query_first_visible(frame, selectors['password'])
+        if password_input:
+            return {
+                'is_login_form': True,
+                'probe_type': 'password_input',
+                'matched_selector': password_selector,
+                'matched_text': None,
+            }
+
+        password_tab, tab_selector = self._query_first_visible(frame, selectors['tab'])
+        submit_button, submit_selector = self._query_first_visible(frame, selectors['submit'])
+
+        submit_text = None
+        if submit_button:
+            try:
+                submit_text = ' '.join((submit_button.inner_text() or '').split())
+            except Exception:
+                submit_text = None
+
+        if password_tab and submit_button:
+            return {
+                'is_login_form': True,
+                'probe_type': 'password_tab_plus_submit',
+                'matched_selector': f"{tab_selector} + {submit_selector}",
+                'matched_text': submit_text,
+            }
+
+        if submit_button:
+            probe_type = 'submit_only'
+            submit_text_value = submit_text or ''
+            if submit_selector == 'text=登录' or any(
+                keyword in submit_text_value for keyword in ('进入', '继续', '去登录', '去看看')
+            ):
+                probe_type = 'direct_enter_like'
+            return {
+                'is_login_form': False,
+                'probe_type': probe_type,
+                'matched_selector': submit_selector,
+                'matched_text': submit_text,
+            }
+
+        if password_tab:
+            return {
+                'is_login_form': False,
+                'probe_type': 'tab_only',
+                'matched_selector': tab_selector,
+                'matched_text': None,
+            }
+
+        return {
+            'is_login_form': False,
+            'probe_type': 'none',
+            'matched_selector': None,
+            'matched_text': None,
+        }
+
+    def _find_login_form_with_retry(self, page, timeout_seconds: float = 8.0,
+                                    poll_interval: float = 1.0):
+        if not page:
+            return None, False, None
+
+        deadline = time.time() + max(timeout_seconds, 0.0)
+        attempt = 0
+        last_non_form_probe = None
+
+        while True:
+            attempt += 1
+            search_frames = [('主页面', page)]
+            try:
+                for idx, frame in enumerate(page.frames):
+                    if frame == page.main_frame:
+                        continue
+                    search_frames.append((f'Frame {idx}', frame))
+            except Exception:
+                pass
+
+            for frame_label, frame in search_frames:
+                probe_info = self._probe_login_form_state(frame)
+                if probe_info.get('is_login_form'):
+                    matched_selector = probe_info.get('matched_selector')
+                    probe_type = probe_info.get('probe_type')
+                    probe_text = probe_info.get('matched_text')
+                    probe_note = f" [{probe_text}]" if probe_text else ""
+                    logger.info(
+                        f"【{self.pure_user_id}】✓ 第{attempt}次探测在{frame_label}找到登录表单({probe_type}): "
+                        f"{matched_selector}{probe_note}"
+                    )
+                    return frame, True, matched_selector
+
+                if probe_info.get('probe_type') not in {'missing', 'none'}:
+                    last_non_form_probe = {
+                        'frame_label': frame_label,
+                        'attempt': attempt,
+                        **probe_info,
+                    }
+
+            if time.time() >= deadline:
+                break
+
+            time.sleep(max(poll_interval, 0.1))
+
+        if last_non_form_probe:
+            probe_text = last_non_form_probe.get('matched_text')
+            probe_note = f" [{probe_text}]" if probe_text else ""
+            logger.warning(
+                f"【{self.pure_user_id}】登录表单探测超时，最近一次仅命中非表单态"
+                f"({last_non_form_probe.get('probe_type')})，位置={last_non_form_probe.get('frame_label')}，"
+                f"选择器={last_non_form_probe.get('matched_selector')}{probe_note}"
+            )
+        logger.warning(
+            f"【{self.pure_user_id}】在 {timeout_seconds:.1f}s 内未探测到登录表单"
+        )
+        return None, False, None
+
+    def _clear_page_storage_state(self, context=None, fallback_page=None) -> int:
+        cleared_pages = 0
+        for candidate in self._get_context_pages(context, fallback_page):
+            try:
+                candidate.evaluate(
+                    "() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }"
+                )
+                cleared_pages += 1
+            except Exception:
+                continue
+        return cleared_pages
+
+    def _prepare_login_page_after_cleanup(self, context, page, *, clear_storage: bool = False,
+                                          reopen_fresh_page: bool = False,
+                                          timeout_seconds: float = 8.0):
+        if context:
+            context.clear_cookies()
+
+        if clear_storage:
+            cleared_pages = self._clear_page_storage_state(context, page)
+            logger.info(f"【{self.pure_user_id}】已清理 {cleared_pages} 个页面的本地存储")
+
+        active_page = page
+        active_page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(1)
+        login_frame, found_login_form, matched_selector = self._find_login_form_with_retry(
+            active_page,
+            timeout_seconds=timeout_seconds,
+            poll_interval=1.0,
+        )
+        if found_login_form:
+            return active_page, login_frame, True, matched_selector, False
+
+        if reopen_fresh_page and context:
+            try:
+                fresh_page = context.new_page()
+                fresh_page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=30000)
+                time.sleep(1)
+                login_frame, found_login_form, matched_selector = self._find_login_form_with_retry(
+                    fresh_page,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=1.0,
+                )
+                if found_login_form:
+                    logger.info(f"【{self.pure_user_id}】✓ 新建页面后找到登录表单")
+                    return fresh_page, login_frame, True, matched_selector, True
+                try:
+                    fresh_page.close()
+                except Exception:
+                    pass
+            except Exception as fresh_page_error:
+                logger.warning(f"【{self.pure_user_id}】新建页面重新探测登录表单失败: {fresh_page_error}")
+
+        return active_page, None, False, None, False
+
     def _page_has_login_form(self, page) -> bool:
         if not page:
             return False
-
-        login_selectors = [
-            '#fm-login-id',
-            'input[name="fm-login-id"]',
-            '#fm-login-password',
-            'button.password-login',
-        ]
 
         frames_to_check = [page]
         try:
@@ -2183,13 +2418,11 @@ class XianyuSliderStealth:
             pass
 
         for frame in frames_to_check:
-            for selector in login_selectors:
-                try:
-                    element = frame.query_selector(selector)
-                    if element and element.is_visible():
-                        return True
-                except Exception:
-                    continue
+            try:
+                if self._probe_login_form_state(frame).get('is_login_form'):
+                    return True
+            except Exception:
+                continue
 
         return False
 
@@ -2314,6 +2547,46 @@ class XianyuSliderStealth:
                     pass
 
         return False, monitor_page, cookie_dict
+
+    def _recover_from_missing_login_inputs(
+        self,
+        context,
+        page,
+        *,
+        missing_field: str,
+        notification_callback: Optional[Callable] = None,
+        notification_scene: str = '账号密码登录',
+    ) -> Tuple[bool, Any]:
+        logger.warning(
+            f"【{self.pure_user_id}】未找到{missing_field}，复检当前页面是否处于已登录态或验证页..."
+        )
+
+        login_success, active_page, _ = self._probe_context_login_success(context, page)
+        if login_success:
+            cookies_dict = self._snapshot_context_cookies(context)
+            logger.info(f"【{self.pure_user_id}】复检已登录成功，Cookie字段数: {len(cookies_dict)}")
+            if cookies_dict:
+                self._log_cookie_snapshot_integrity(cookies_dict, f"{missing_field}复检已登录场景")
+                logger.success(f"【{self.pure_user_id}】✅ 页面实际已登录，停止继续账密输入")
+                return True, cookies_dict
+
+            logger.error(f"【{self.pure_user_id}】❌ 复检已登录后仍未获取到有效Cookie")
+            return True, self._fail_login("复检已登录后未获取到有效Cookie")
+
+        monitor_page = self._select_monitor_page(context, active_page or page) or active_page or page
+        if monitor_page:
+            has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+            if has_qr:
+                logger.info(f"【{self.pure_user_id}】复检发现当前页面需要人工验证，转入验证流程")
+                return True, self._process_verification_requirement(
+                    context,
+                    monitor_page,
+                    qr_frame,
+                    notification_callback,
+                    notification_scene,
+                )
+
+        return False, None
 
     def _page_has_slider(self, page) -> bool:
         if not page:
@@ -5612,7 +5885,7 @@ class XianyuSliderStealth:
                                         'sms_verify': 'sms_verify',
                                         'qr_verify': 'qr_verify',
                                         'face_verify': 'face_verify',
-                                        'unknown': 'face_verify'
+                                        'unknown': 'unknown'
                                     }
                                     event_type_names = {
                                         'password_error': '账号密码错误',
@@ -5621,7 +5894,7 @@ class XianyuSliderStealth:
                                         'face_verify': '人脸验证',
                                         'unknown': '身份验证'
                                     }
-                                    db_event_type = event_type_map.get(verification_type, 'face_verify')
+                                    db_event_type = event_type_map.get(verification_type, 'unknown')
                                     event_name = event_type_names.get(verification_type, '身份验证')
                                     db_manager.add_risk_control_log(
                                         cookie_id=self.pure_user_id,
@@ -5673,15 +5946,20 @@ class XianyuSliderStealth:
                                         screenshot_path=verification_screenshot
                                     )
 
-                                # 人脸验证或未知类型，继续原有逻辑
-                                face_verify_url = self._get_face_verification_url(frame)
-                                if face_verify_url:
-                                    logger.info(f"【{self.pure_user_id}】✅ 获取到人脸验证链接: {face_verify_url}")
+                                verify_url = None
+                                if verification_type == 'face_verify':
+                                    verify_url = self._get_face_verification_url(frame)
+                                    if verify_url:
+                                        logger.info(f"【{self.pure_user_id}】✅ 获取到人脸验证链接: {verify_url}")
+                                elif verification_type == 'unknown':
+                                    logger.warning(
+                                        f"【{self.pure_user_id}】验证类型仍不明确，保留为unknown，不默认按人脸验证处理"
+                                    )
 
                                 return True, VerificationFrameWrapper(
                                     frame,
                                     verification_type=verification_type if verification_type in {'face_verify', 'unknown'} else 'unknown',
-                                    verify_url=face_verify_url,
+                                    verify_url=verify_url,
                                     screenshot_path=verification_screenshot
                                 )
                     except PasswordLoginVerificationError:
@@ -5720,7 +5998,7 @@ class XianyuSliderStealth:
 
                             verification_screenshot = self._capture_verification_screenshot(page, frame=frame)
                             verify_url = frame_url
-                            if verification_type in {'face_verify', 'unknown'}:
+                            if verification_type == 'face_verify':
                                 verify_url = self._get_face_verification_url(frame) or frame_url
 
                             logger.info(f"【{self.pure_user_id}】✅ 在Frame {idx} 检测到 mini_login 页面（人脸验证/短信验证）")
@@ -5748,7 +6026,7 @@ class XianyuSliderStealth:
 
                                 verification_screenshot = self._capture_verification_screenshot(page, frame=frame)
                                 verify_url = frame_url
-                                if verification_type in {'face_verify', 'unknown'}:
+                                if verification_type == 'face_verify':
                                     verify_url = self._get_face_verification_url(frame) or frame_url
 
                                 return True, VerificationFrameWrapper(
@@ -6200,82 +6478,22 @@ class XianyuSliderStealth:
                 
                 # 【步骤1】查找登录frame（闲鱼登录通常在iframe中）
                 logger.info(f"【{self.pure_user_id}】查找登录frame...")
-                login_frame = None
-                found_login_form = False
-                iframes = []
+                login_selectors = self._get_password_login_selectors()
                 
                 # 等待页面和iframe加载完成
                 logger.info(f"【{self.pure_user_id}】等待页面和iframe加载...")
-                time.sleep(1)  # 增加等待时间，确保iframe加载完成
-                
-                # 先尝试在主页面查找登录表单
-                logger.info(f"【{self.pure_user_id}】在主页面查找登录表单...")
-                main_page_selectors = [
-                    '#fm-login-id',
-                    'input[name="fm-login-id"]',
-                    'input[placeholder*="手机号"]',
-                    'input[placeholder*="邮箱"]',
-                    '.fm-login-id',
-                    '#J_LoginForm input[type="text"]'
-                ]
-                for selector in main_page_selectors:
-                    try:
-                        element = page.query_selector(selector)
-                        if element and element.is_visible():
-                            logger.info(f"【{self.pure_user_id}】✓ 在主页面找到登录表单元素: {selector}")
-                            # 主页面找到登录表单，使用page作为login_frame
-                            login_frame = page
-                            found_login_form = True
-                            break
-                    except:
-                        continue
-                
-                # 如果主页面没找到，再在iframe中查找
-                if not found_login_form:
-                    iframes = page.query_selector_all('iframe')
-                    logger.info(f"【{self.pure_user_id}】找到 {len(iframes)} 个 iframe")
-                    
-                    # 尝试在iframe中查找登录表单
-                    for idx, iframe in enumerate(iframes):
-                        try:
-                            frame = iframe.content_frame()
-                            if frame:
-                                # 等待iframe内容加载
-                                try:
-                                    frame.wait_for_selector('#fm-login-id', timeout=3000)
-                                except:
-                                    pass
-                                
-                                # 检查是否有登录表单
-                                login_selectors = [
-                                    '#fm-login-id',
-                                    'input[name="fm-login-id"]',
-                                    'input[placeholder*="手机号"]',
-                                    'input[placeholder*="邮箱"]'
-                                ]
-                                for selector in login_selectors:
-                                    try:
-                                        element = frame.query_selector(selector)
-                                        if element and element.is_visible():
-                                            logger.info(f"【{self.pure_user_id}】✓ 在Frame {idx} 找到登录表单: {selector}")
-                                            login_frame = frame
-                                            found_login_form = True
-                                            break
-                                    except:
-                                        continue
-                                
-                                if found_login_form:
-                                    break
-                                else:
-                                    # Frame存在但没有登录表单，可能是滑块验证frame
-                                    logger.debug(f"【{self.pure_user_id}】Frame {idx} 未找到登录表单")
-                        except Exception as e:
-                            logger.debug(f"【{self.pure_user_id}】检查Frame {idx}时出错: {e}")
-                            continue
+                time.sleep(1)
+                login_frame, found_login_form, matched_selector = self._find_login_form_with_retry(
+                    page,
+                    timeout_seconds=8.0,
+                    poll_interval=1.0,
+                )
+                iframes = page.query_selector_all('iframe')
+                logger.info(f"【{self.pure_user_id}】当前检测到 {len(iframes)} 个 iframe")
                 
                 # 【情况1】找到frame且找到登录表单 → 正常登录流程
                 if found_login_form:
-                    logger.info(f"【{self.pure_user_id}】找到登录表单，开始正常登录流程...")
+                    logger.info(f"【{self.pure_user_id}】找到登录表单（{matched_selector}），开始正常登录流程...")
                 
                 # 【情况2】找到frame但未找到登录表单 → 可能已登录，直接检测滑块
                 elif len(iframes) > 0:
@@ -6548,31 +6766,20 @@ class XianyuSliderStealth:
                                         f"【{self.pure_user_id}】服务端Session已过期，"
                                         f"前端登录状态为假象，需要重新账密登录"
                                     )
-                                    # 清除注入的旧 Cookie，强制刷新页面让登录 iframe 出现
-                                    context.clear_cookies()
-                                    page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=30000)
-                                    time.sleep(2)
-                                    # 重新查找 iframe，走正常登录流程
-                                    login_frame = None
-                                    found_login_form = False
-                                    for frame in page.frames:
-                                        if frame != page.main_frame:
-                                            try:
-                                                for selector in main_page_selectors:
-                                                    element = frame.query_selector(selector)
-                                                    if element and element.is_visible():
-                                                        login_frame = frame
-                                                        found_login_form = True
-                                                        logger.info(f"【{self.pure_user_id}】✓ 清除Cookie后找到登录iframe")
-                                                        break
-                                            except Exception:
-                                                continue
-                                        if found_login_form:
-                                            break
-
+                                    page, login_frame, found_login_form, matched_selector, reopened_fresh_page = (
+                                        self._prepare_login_page_after_cleanup(
+                                            context,
+                                            page,
+                                            clear_storage=True,
+                                            reopen_fresh_page=True,
+                                            timeout_seconds=8.0,
+                                        )
+                                    )
                                     if not found_login_form:
-                                        logger.error(f"【{self.pure_user_id}】清除Cookie后仍未找到登录iframe")
-                                        return self._fail_login("Session过期且清除Cookie后未找到登录表单")
+                                        logger.error(f"【{self.pure_user_id}】清理会话状态后仍未找到登录表单")
+                                        return self._fail_login("Session过期且清理会话状态后未找到登录表单")
+                                    if reopened_fresh_page:
+                                        logger.info(f"【{self.pure_user_id}】已切换到新页面继续账密登录")
                                     # 跳出当前分支，继续走下面的账密输入流程
                                 else:
                                     logger.info(f"【{self.pure_user_id}】✅ 服务端Session验证通过，Cookie有效")
@@ -6585,27 +6792,19 @@ class XianyuSliderStealth:
                                     return None
                             except Exception as verify_e:
                                 logger.warning(f"【{self.pure_user_id}】Session验证异常: {verify_e}，按Session过期处理")
-                                context.clear_cookies()
-                                page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=30000)
-                                time.sleep(2)
-                                login_frame = None
-                                found_login_form = False
-                                for frame in page.frames:
-                                    if frame != page.main_frame:
-                                        try:
-                                            for selector in main_page_selectors:
-                                                element = frame.query_selector(selector)
-                                                if element and element.is_visible():
-                                                    login_frame = frame
-                                                    found_login_form = True
-                                                    logger.info(f"【{self.pure_user_id}】✓ 异常处理后找到登录iframe")
-                                                    break
-                                        except Exception:
-                                            continue
-                                    if found_login_form:
-                                        break
+                                page, login_frame, found_login_form, matched_selector, reopened_fresh_page = (
+                                    self._prepare_login_page_after_cleanup(
+                                        context,
+                                        page,
+                                        clear_storage=True,
+                                        reopen_fresh_page=True,
+                                        timeout_seconds=8.0,
+                                    )
+                                )
                                 if not found_login_form:
-                                    return self._fail_login("Session验证异常且未找到登录表单")
+                                    return self._fail_login("Session验证异常且清理会话状态后未找到登录表单")
+                                if reopened_fresh_page:
+                                    logger.info(f"【{self.pure_user_id}】Session异常后已切换到新页面继续账密登录")
                         else:
                             # 非刷新模式，直接返回Cookie
                             cookies_dict = self._snapshot_context_cookies(context)
@@ -6624,62 +6823,20 @@ class XianyuSliderStealth:
                                 f"【{self.pure_user_id}】持久化上下文页面状态异常（无iframe、无已登录态），"
                                 f"清除Cookie和缓存后重新加载..."
                             )
-                            # 清除 Cookie，强制让页面恢复到未登录状态
-                            context.clear_cookies()
-                            # 清除浏览器缓存（localStorage/sessionStorage）
-                            try:
-                                page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
-                            except Exception:
-                                pass
-                            # 重新加载页面
-                            page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=30000)
-                            time.sleep(3)
-
-                            # 重新在主页面查找登录表单
-                            login_frame = None
-                            found_login_form = False
-                            for selector in main_page_selectors:
-                                try:
-                                    element = page.query_selector(selector)
-                                    if element and element.is_visible():
-                                        login_frame = page
-                                        found_login_form = True
-                                        logger.info(f"【{self.pure_user_id}】✓ 清除缓存后在主页面找到登录表单: {selector}")
-                                        break
-                                except Exception:
-                                    continue
-
-                            # 主页面没找到，在 iframe 中查找
-                            if not found_login_form:
-                                retry_iframes = page.query_selector_all('iframe')
-                                logger.info(f"【{self.pure_user_id}】清除缓存后找到 {len(retry_iframes)} 个 iframe")
-                                for idx, iframe in enumerate(retry_iframes):
-                                    try:
-                                        frame = iframe.content_frame()
-                                        if frame:
-                                            try:
-                                                frame.wait_for_selector('#fm-login-id', timeout=3000)
-                                            except Exception:
-                                                pass
-                                            for selector in ['#fm-login-id', 'input[name="fm-login-id"]',
-                                                             'input[placeholder*="手机号"]', 'input[placeholder*="邮箱"]']:
-                                                try:
-                                                    element = frame.query_selector(selector)
-                                                    if element and element.is_visible():
-                                                        login_frame = frame
-                                                        found_login_form = True
-                                                        logger.info(f"【{self.pure_user_id}】✓ 清除缓存后在Frame {idx} 找到登录iframe")
-                                                        break
-                                                except Exception:
-                                                    continue
-                                            if found_login_form:
-                                                break
-                                    except Exception:
-                                        continue
+                            page, login_frame, found_login_form, matched_selector, _ = (
+                                self._prepare_login_page_after_cleanup(
+                                    context,
+                                    page,
+                                    clear_storage=True,
+                                    reopen_fresh_page=False,
+                                    timeout_seconds=8.0,
+                                )
+                            )
 
                             if not found_login_form:
                                 logger.error(f"【{self.pure_user_id}】❌ 清除缓存后仍未找到登录表单")
                                 return self._fail_login("持久化上下文清除缓存后仍未找到登录表单")
+                            logger.info(f"【{self.pure_user_id}】✓ 清除缓存后找到登录表单: {matched_selector}")
                             # found_login_form=True → 继续走下面的账密输入流程
                         else:
                             logger.error(f"【{self.pure_user_id}】❌ 未找到登录表单且未检测到已登录")
@@ -6688,11 +6845,16 @@ class XianyuSliderStealth:
                 # 点击密码登录标签
                 logger.info(f"【{self.pure_user_id}】查找密码登录标签...")
                 try:
-                    password_tab = login_frame.query_selector('a.password-login-tab-item')
+                    password_tab, password_tab_selector = self._query_first_visible(
+                        login_frame,
+                        login_selectors['tab'],
+                    )
                     if password_tab:
-                        logger.info(f"【{self.pure_user_id}】✓ 找到密码登录标签，点击中...")
+                        logger.info(f"【{self.pure_user_id}】✓ 找到密码登录标签，点击中: {password_tab_selector}")
                         password_tab.click()
                         time.sleep(1.5)
+                    else:
+                        logger.info(f"【{self.pure_user_id}】未找到密码登录标签，可能默认已处于密码登录模式")
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】查找密码登录标签失败: {e}")
                 
@@ -6700,37 +6862,65 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】输入账号: {account}")
                 time.sleep(1)
                 
-                account_input = login_frame.query_selector('#fm-login-id')
+                account_input, account_selector = self._query_first_visible(
+                    login_frame,
+                    login_selectors['account'],
+                )
                 if account_input:
-                    logger.info(f"【{self.pure_user_id}】✓ 找到账号输入框")
+                    logger.info(f"【{self.pure_user_id}】✓ 找到账号输入框: {account_selector}")
                     account_input.fill(account)
                     logger.info(f"【{self.pure_user_id}】✓ 账号已输入")
                     time.sleep(random.uniform(0.5, 1.0))
                 else:
+                    handled, recovery_result = self._recover_from_missing_login_inputs(
+                        context,
+                        page,
+                        missing_field='账号输入框',
+                        notification_callback=notification_callback,
+                        notification_scene=notification_scene,
+                    )
+                    if handled:
+                        return recovery_result
                     logger.error(f"【{self.pure_user_id}】✗ 未找到账号输入框")
-                    return None
+                    return self._fail_login("未找到账号输入框")
                 
                 # 输入密码
                 logger.info(f"【{self.pure_user_id}】输入密码...")
-                password_input = login_frame.query_selector('#fm-login-password')
+                password_input, password_selector = self._query_first_visible(
+                    login_frame,
+                    login_selectors['password'],
+                )
                 if password_input:
+                    logger.info(f"【{self.pure_user_id}】✓ 找到密码输入框: {password_selector}")
                     password_input.fill(password)
                     logger.info(f"【{self.pure_user_id}】✓ 密码已输入")
                     time.sleep(random.uniform(0.5, 1.0))
                 else:
+                    handled, recovery_result = self._recover_from_missing_login_inputs(
+                        context,
+                        page,
+                        missing_field='密码输入框',
+                        notification_callback=notification_callback,
+                        notification_scene=notification_scene,
+                    )
+                    if handled:
+                        return recovery_result
                     logger.error(f"【{self.pure_user_id}】✗ 未找到密码输入框")
-                    return None
+                    return self._fail_login("未找到密码输入框")
                 
                 # 勾选用户协议
                 logger.info(f"【{self.pure_user_id}】查找并勾选用户协议...")
                 try:
-                    agreement_checkbox = login_frame.query_selector('#fm-agreement-checkbox')
+                    agreement_checkbox, agreement_selector = self._query_first_visible(
+                        login_frame,
+                        login_selectors['agreement'],
+                    )
                     if agreement_checkbox:
                         is_checked = agreement_checkbox.evaluate('el => el.checked')
                         if not is_checked:
                             agreement_checkbox.click()
                             time.sleep(0.3)
-                            logger.info(f"【{self.pure_user_id}】✓ 用户协议已勾选")
+                            logger.info(f"【{self.pure_user_id}】✓ 用户协议已勾选: {agreement_selector}")
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】勾选用户协议失败: {e}")
                 
@@ -6738,14 +6928,22 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】点击登录按钮...")
                 time.sleep(1)
                 
-                login_button = login_frame.query_selector('button.password-login')
+                login_button, login_button_selector = self._query_first_visible(
+                    login_frame,
+                    login_selectors['submit'],
+                )
                 if login_button:
-                    logger.info(f"【{self.pure_user_id}】✓ 找到登录按钮")
+                    logger.info(f"【{self.pure_user_id}】✓ 找到登录按钮: {login_button_selector}")
                     login_button.click()
                     logger.info(f"【{self.pure_user_id}】✓ 登录按钮已点击")
                 else:
-                    logger.error(f"【{self.pure_user_id}】✗ 未找到登录按钮")
-                    return None
+                    logger.warning(f"【{self.pure_user_id}】未找到登录按钮，尝试回车提交")
+                    try:
+                        password_input.press('Enter')
+                        logger.info(f"【{self.pure_user_id}】✓ 已通过回车提交登录")
+                    except Exception:
+                        logger.error(f"【{self.pure_user_id}】✗ 未找到登录按钮且回车提交失败")
+                        return self._fail_login("未找到登录按钮")
                 
                 # 【关键】点击登录后，等待一下再检测滑块
                 logger.info(f"【{self.pure_user_id}】========== 登录后监控 ==========")

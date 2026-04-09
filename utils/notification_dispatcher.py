@@ -55,7 +55,7 @@ DEFAULT_NOTIFICATION_TEMPLATES = {
 时间: {time}
 
 请及时处理！''',
-    'slider_success': '''✅ 滑块验证成功，cookies已自动更新到数据库
+    'slider_success': '''✅ 滑块验证成功，{status_text}
 
 账号: {account_id}
 时间: {time}''',
