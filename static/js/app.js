@@ -9,11 +9,16 @@ let editCookieId = '';
 let authToken = localStorage.getItem('auth_token');
 let dashboardData = {
     accounts: [],
-    totalKeywords: 0
+    totalKeywords: 0,
+    totalItems: 0
 };
 let pendingAccountManagementFocusId = '';
 let aboutDiagnosticsAccounts = [];
 let aboutDiagnosticsInitialized = false;
+let dashboardRuntimeRetryTimer = null;
+let aboutRuntimeRetryTimer = null;
+let lastDashboardRuntimeRetryAt = 0;
+let lastAboutRuntimeRetryAt = 0;
 const DASHBOARD_ANNOUNCEMENT_DISMISS_PREFIX = 'dashboard_announcement_dismissed_';
 let dashboardAnnouncementState = {
     current: null,
@@ -175,6 +180,16 @@ function showSection(sectionName) {
         button.textContent = '开启自动刷新';
         if (icon) icon.className = 'bi bi-play-circle me-1';
     }
+    }
+
+    if (sectionName !== 'dashboard' && dashboardRuntimeRetryTimer) {
+        clearTimeout(dashboardRuntimeRetryTimer);
+        dashboardRuntimeRetryTimer = null;
+    }
+
+    if (sectionName !== 'accounts' && aboutRuntimeRetryTimer) {
+        clearTimeout(aboutRuntimeRetryTimer);
+        aboutRuntimeRetryTimer = null;
     }
 }
 
@@ -632,11 +647,117 @@ function renderDashboardAccountMetric(label, value, tone = 'off') {
     `;
 }
 
+function isRuntimeStatusHealthy(runtimeStatus) {
+    return Boolean(
+        runtimeStatus?.running
+        && runtimeStatus.ws_ready
+        && runtimeStatus.session_ready
+        && runtimeStatus.has_current_token
+        && runtimeStatus.message_stream_ready
+    );
+}
+
+function shouldAutoRetryRuntimeStatus(runtimeStatus) {
+    if (!runtimeStatus?.running) {
+        return false;
+    }
+
+    const connectionState = String(runtimeStatus.connection_state || '').trim();
+    if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+        return true;
+    }
+
+    if (isRuntimeStatusHealthy(runtimeStatus)) {
+        return false;
+    }
+
+    const stateChangedAt = Number(runtimeStatus.state_last_changed_at || 0);
+    if (!stateChangedAt) {
+        return false;
+    }
+
+    return ((Date.now() / 1000) - stateChangedAt) <= 20;
+}
+
+function scheduleDashboardRuntimeAutoRetry(accounts) {
+    if (dashboardRuntimeRetryTimer) {
+        clearTimeout(dashboardRuntimeRetryTimer);
+        dashboardRuntimeRetryTimer = null;
+    }
+
+    if (!document.getElementById('dashboard-section')?.classList.contains('active')) {
+        return;
+    }
+
+    if (!Array.isArray(accounts) || !accounts.some(account => shouldAutoRetryRuntimeStatus(account.runtime_status))) {
+        return;
+    }
+
+    if (Date.now() - lastDashboardRuntimeRetryAt < 15000) {
+        return;
+    }
+
+    const hasTransientState = accounts.some(account => {
+        const connectionState = String(account?.runtime_status?.connection_state || '').trim();
+        return connectionState === 'connecting' || connectionState === 'reconnecting';
+    });
+    const delay = hasTransientState ? 3500 : 5000;
+
+    dashboardRuntimeRetryTimer = setTimeout(() => {
+        dashboardRuntimeRetryTimer = null;
+        if (!document.getElementById('dashboard-section')?.classList.contains('active')) {
+            return;
+        }
+        lastDashboardRuntimeRetryAt = Date.now();
+        refreshDashboardRuntimeSnapshots();
+    }, delay);
+}
+
+function scheduleAboutRuntimeAutoRetry(accountId, runtimeStatus) {
+    if (aboutRuntimeRetryTimer) {
+        clearTimeout(aboutRuntimeRetryTimer);
+        aboutRuntimeRetryTimer = null;
+    }
+
+    const normalizedAccountId = String(accountId || '').trim();
+    if (!normalizedAccountId) {
+        return;
+    }
+
+    if (!document.getElementById('accounts-section')?.classList.contains('active')) {
+        return;
+    }
+
+    if (!shouldAutoRetryRuntimeStatus(runtimeStatus)) {
+        return;
+    }
+
+    if (Date.now() - lastAboutRuntimeRetryAt < 12000) {
+        return;
+    }
+
+    const connectionState = String(runtimeStatus?.connection_state || '').trim();
+    const delay = (connectionState === 'connecting' || connectionState === 'reconnecting') ? 3000 : 5000;
+
+    aboutRuntimeRetryTimer = setTimeout(() => {
+        aboutRuntimeRetryTimer = null;
+        if (!document.getElementById('accounts-section')?.classList.contains('active')) {
+            return;
+        }
+        if (getAboutSelectedAccountId() !== normalizedAccountId) {
+            return;
+        }
+        lastAboutRuntimeRetryAt = Date.now();
+        loadAboutRuntimeStatus(normalizedAccountId);
+    }, delay);
+}
+
 function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const normalizedRuntimeStatus = runtimeStatus || {};
     const connectionState = normalizedRuntimeStatus.connection_state || 'not_running';
     const keepaliveDisplayStatus = normalizedRuntimeStatus.session_keepalive_display_status || normalizedRuntimeStatus.session_keepalive_status || '';
     const tokenStatus = normalizedRuntimeStatus.token_refresh_status || '';
+    const messageStreamStatus = normalizedRuntimeStatus.message_stream_status || '';
 
     const connectionText = getAboutStatusText('connection', connectionState) || '未运行';
     const connectionTone = getAboutStatusVariant('connection', connectionState);
@@ -652,12 +773,13 @@ function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const tokenTone = tokenStatus
         ? getAboutStatusVariant('token', tokenStatus)
         : 'secondary';
-    const runningHealthy = Boolean(
-        normalizedRuntimeStatus.running
-        && normalizedRuntimeStatus.ws_ready
-        && normalizedRuntimeStatus.session_ready
-        && normalizedRuntimeStatus.has_current_token
-    );
+    const messageStreamText = messageStreamStatus
+        ? (getAboutStatusText('stream', messageStreamStatus) || messageStreamStatus)
+        : (normalizedRuntimeStatus.running ? '观察中' : '未运行');
+    const messageStreamTone = messageStreamStatus
+        ? getAboutStatusVariant('stream', messageStreamStatus)
+        : 'secondary';
+    const runningHealthy = isRuntimeStatusHealthy(normalizedRuntimeStatus);
     const summaryText = !normalizedRuntimeStatus.running
         ? '未运行'
         : (runningHealthy ? '运行正常' : '部分异常');
@@ -667,7 +789,8 @@ function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const items = [
         { label: '连接', text: connectionText, tone: connectionTone },
         { label: '保活', text: keepaliveText, tone: keepaliveTone },
-        { label: 'Token', text: tokenText, tone: tokenTone }
+        { label: 'Token', text: tokenText, tone: tokenTone },
+        { label: '消息流', text: messageStreamText, tone: messageStreamTone }
     ];
 
     return `
@@ -868,6 +991,7 @@ async function loadDashboard() {
 
         // 加载商品总数
         const totalItems = await loadItemsCount();
+        dashboardData.totalItems = totalItems;
 
         // 加载订单看板数据
         const orderMetrics = await loadOrderDashboardMetrics();
@@ -880,6 +1004,7 @@ async function loadDashboard() {
 
         // 更新仪表盘显示
         renderDashboardAccountOverview(accountsWithKeywords, totalItems);
+        scheduleDashboardRuntimeAutoRetry(accountsWithKeywords);
         await loadDashboardDeliveryLogs();
     }
     } catch (error) {
@@ -887,6 +1012,35 @@ async function loadDashboard() {
     showToast('加载仪表盘数据失败', 'danger');
     } finally {
     toggleLoading(false);
+    }
+}
+
+async function refreshDashboardRuntimeSnapshots() {
+    if (!dashboardData.accounts.length) {
+        return;
+    }
+
+    try {
+        const cookieDetails = await fetchJSON(`${apiBase}/cookies/details`);
+        const runtimeStatusMap = new Map(
+            (Array.isArray(cookieDetails) ? cookieDetails : []).map(cookie => [String(cookie.id), cookie.runtime_status || null])
+        );
+
+        dashboardData.accounts = dashboardData.accounts.map(account => {
+            const accountId = String(account.id || '');
+            if (!runtimeStatusMap.has(accountId)) {
+                return account;
+            }
+            return {
+                ...account,
+                runtime_status: runtimeStatusMap.get(accountId),
+            };
+        });
+
+        renderDashboardAccountOverview(dashboardData.accounts, dashboardData.totalItems || 0);
+        scheduleDashboardRuntimeAutoRetry(dashboardData.accounts);
+    } catch (error) {
+        console.error('刷新仪表盘运行态失败:', error);
     }
 }
 
@@ -3176,6 +3330,16 @@ function getAboutStatusText(type, value) {
             token_missing: '无 Token',
             failed: '失败',
         },
+        stream: {
+            healthy: '正常',
+            recovered: '已恢复',
+            warming_up: '预热中',
+            watching: '观察中',
+            recovering: '恢复中',
+            suspected_stale: '疑似停滞',
+            connection_unready: '连接未就绪',
+            not_running: '未运行',
+        },
     };
 
     return maps[type]?.[normalized] || normalized;
@@ -3193,6 +3357,14 @@ function getAboutStatusVariant(type, value) {
         if (normalized === 'failed') return 'danger';
         if (normalized === 'not_running' || normalized === 'disconnected' || normalized === 'closed') return 'secondary';
         return 'info';
+    }
+
+    if (type === 'stream') {
+        if (normalized === 'healthy' || normalized === 'recovered') return 'success';
+        if (normalized === 'warming_up' || normalized === 'watching' || normalized === 'recovering') return 'info';
+        if (normalized === 'suspected_stale') return 'warning';
+        if (normalized === 'connection_unready' || normalized === 'not_running') return 'secondary';
+        return 'secondary';
     }
 
     if (normalized === 'success' || normalized === 'recovered') return 'success';
@@ -3328,10 +3500,10 @@ function getAboutRuntimeOverview(runtimeStatus, readinessCount = 0) {
         };
     }
 
-    if (!runtimeStatus?.ws_ready || !runtimeStatus?.session_ready || !runtimeStatus?.has_current_token) {
+    if (!runtimeStatus?.ws_ready || !runtimeStatus?.session_ready || !runtimeStatus?.has_current_token || !runtimeStatus?.message_stream_ready) {
         return {
             tone: 'warning',
-            title: `${readinessCount} / 4 关键链路已就绪`,
+            title: `${readinessCount} / 5 关键链路已就绪`,
             note: '链路部分可用，优先处理未就绪项，再观察保活与消息链路。',
         };
     }
@@ -3339,7 +3511,7 @@ function getAboutRuntimeOverview(runtimeStatus, readinessCount = 0) {
     return {
         tone: 'success',
         title: '链路稳定可用',
-        note: '连接、轻保活与 Token 三条主信号都处于正常状态。',
+        note: '连接、轻保活、Token 与业务消息流四条主信号都处于正常状态。',
     };
 }
 
@@ -3372,11 +3544,13 @@ function renderAboutRuntimeStatus(runtimeStatus) {
         runtimeStatus.state_last_changed_at_display,
         runtimeStatus.state_last_changed_at
     );
+    const messageStreamStatus = runtimeStatus.message_stream_status || '';
     const readinessItems = [
         { label: '实例', ready: !!runtimeStatus.running },
         { label: 'WS', ready: !!runtimeStatus.ws_ready },
         { label: 'Session', ready: !!runtimeStatus.session_ready },
         { label: 'Token', ready: !!runtimeStatus.has_current_token },
+        { label: '业务流', ready: !!runtimeStatus.message_stream_ready },
     ];
     const readinessSignalItems = readinessItems.slice(1);
     const readinessCount = readinessItems.filter(item => item.ready).length;
@@ -3385,6 +3559,7 @@ function renderAboutRuntimeStatus(runtimeStatus) {
     const keepaliveDisplayStatus = runtimeStatus.session_keepalive_display_status || runtimeStatus.session_keepalive_status;
     const keepaliveTone = getAboutStatusVariant('keepalive', keepaliveDisplayStatus);
     const tokenTone = getAboutStatusVariant('token', runtimeStatus.token_refresh_status);
+    const messageStreamTone = getAboutStatusVariant('stream', messageStreamStatus);
     const readinessTone = readinessSignalItems.every(item => item.ready)
         ? 'success'
         : readinessSignalItems.some(item => item.ready)
@@ -3428,9 +3603,18 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                     icon: 'key',
                 })}
                 ${buildAboutRuntimeStatusItem({
+                    label: '业务消息流',
+                    value: buildAboutStatusBadge('stream', messageStreamStatus),
+                    note: runtimeStatus.message_stream_note || '暂无业务消息流状态信息',
+                    tone: messageStreamTone,
+                    richValue: true,
+                    accent: 'readiness',
+                    icon: 'broadcast-pin',
+                })}
+                ${buildAboutRuntimeStatusItem({
                     label: '链路就绪情况',
                     value: buildAboutReadinessValue(readinessSignalItems),
-                    note: `${readinessSignalItems.filter(item => item.ready).length} / 3 链路已就绪`,
+                    note: `${readinessSignalItems.filter(item => item.ready).length} / 4 链路已就绪`,
                     tone: readinessTone,
                     richValue: true,
                     accent: 'readiness',
@@ -3581,6 +3765,7 @@ async function loadAboutRuntimeStatus(accountId = '') {
             renderAboutAccountMeta(targetAccount);
         }
         renderAboutRuntimeStatus(runtimeStatus);
+        scheduleAboutRuntimeAutoRetry(normalizedAccountId, runtimeStatus);
     } catch (error) {
         console.error('加载账号运行态失败:', error);
     }
@@ -17426,7 +17611,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.9.0';
+const DEFAULT_VERSION = 'v1.9.1';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -17537,9 +17722,19 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.9.0',
+    version: 'v1.9.1',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.9.1',
+            date: '2026-04-10',
+            updates: [
+                '【新功能】新增业务消息流看门狗，区分心跳包与真实业务包，长时间只有心跳时会主动关闭旧 WebSocket 并触发重连',
+                '【新功能】账号运行态新增消息流诊断字段，补充最近非心跳业务包、同步包、真实买家消息与假在线重连时间，便于识别“连接已通但消息停滞”',
+                '【优化】仪表盘账号卡片和账号详情页新增“消息流”状态，并将链路就绪判断扩展到业务消息流',
+                '【优化】前端对连接中、重连中和短时异常状态增加自动重试刷新，减少运行态展示滞后'
+            ]
+        },
         {
             version: 'v1.9.0',
             date: '2026-04-08',

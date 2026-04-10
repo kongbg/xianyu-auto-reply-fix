@@ -2508,6 +2508,9 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'ws_ready': False,
         'session_ready': False,
         'has_current_token': False,
+        'message_stream_ready': False,
+        'message_stream_status': 'not_running',
+        'message_stream_note': None,
         'token_refresh_status': None,
         'token_refresh_error_message': None,
         'token_last_refreshed_at': None,
@@ -2529,6 +2532,18 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'last_heartbeat_sent_at_display': None,
         'last_heartbeat_sent_age_seconds': None,
         'ws_transport_ready': False,
+        'last_business_activity_at': None,
+        'last_business_activity_at_display': None,
+        'last_business_activity_age_seconds': None,
+        'last_sync_package_at': None,
+        'last_sync_package_at_display': None,
+        'last_sync_package_age_seconds': None,
+        'last_user_chat_at': None,
+        'last_user_chat_at_display': None,
+        'last_user_chat_age_seconds': None,
+        'last_stream_watchdog_reconnect_at': None,
+        'last_stream_watchdog_reconnect_at_display': None,
+        'last_stream_watchdog_reconnect_age_seconds': None,
         'last_message_received_at': None,
         'last_message_received_at_display': None,
         'last_message_age_seconds': None,
@@ -2565,6 +2580,10 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
     heartbeat_sent_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_heartbeat_time', 0))
     token_refreshed_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_token_refresh_time', 0))
     session_keepalive_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_session_keepalive_time', 0))
+    last_non_heartbeat_message_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_non_heartbeat_message_time', 0))
+    last_sync_package_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_sync_package_time', 0))
+    last_user_chat_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_user_chat_time', 0))
+    last_stream_watchdog_reconnect_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_stream_watchdog_reconnect_time', 0))
     last_message_received_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_message_received_time', 0))
     last_successful_connection_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_successful_connection', 0))
     last_state_changed_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_state_change_time', 0))
@@ -2575,11 +2594,14 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
     token_retry_interval = max(30, int(getattr(live_instance, 'token_retry_interval', 180) or 180))
     session_keepalive_interval = max(60, int(getattr(live_instance, 'session_keepalive_interval', 600) or 600))
     session_keepalive_retry_interval = max(30, int(getattr(live_instance, 'session_keepalive_retry_interval', 180) or 180))
+    stream_watchdog_grace_period = max(30, int(getattr(live_instance, 'stream_watchdog_grace_period', heartbeat_interval * 4) or heartbeat_interval * 4))
+    message_stream_watchdog_timeout = max(60, int(getattr(live_instance, 'message_stream_watchdog_timeout', session_keepalive_interval * 3) or session_keepalive_interval * 3))
 
     ws_ready_window = max(heartbeat_timeout * 2, heartbeat_interval * 3, 45)
     recent_connection_window = max(heartbeat_interval + 5, 20)
     session_ready_window = max(session_keepalive_interval + session_keepalive_retry_interval + 30, 180)
     token_ready_window = max(token_refresh_interval + token_retry_interval, 300)
+    now = time.time()
 
     recent_connection = _is_runtime_timestamp_recent(last_successful_connection_at, recent_connection_window)
     recent_heartbeat_ok = _is_runtime_timestamp_recent(heartbeat_response_at, ws_ready_window)
@@ -2634,6 +2656,86 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         )
     )
 
+    actual_business_activity_at = None
+    if last_non_heartbeat_message_at is not None:
+        if last_successful_connection_at is None or last_non_heartbeat_message_at > last_successful_connection_at:
+            actual_business_activity_at = last_non_heartbeat_message_at
+
+    connected_for_seconds = None
+    if last_successful_connection_at is not None:
+        connected_for_seconds = max(0, int(now - last_successful_connection_at))
+
+    business_idle_reference = actual_business_activity_at or last_successful_connection_at
+    business_idle_seconds = None
+    if business_idle_reference is not None:
+        business_idle_seconds = max(0, int(now - business_idle_reference))
+
+    recent_watchdog_reconnect = _is_runtime_timestamp_recent(
+        last_stream_watchdog_reconnect_at,
+        message_stream_watchdog_timeout,
+    )
+    stream_stale_now = bool(
+        ws_ready
+        and recent_heartbeat_ok
+        and connected_for_seconds is not None
+        and connected_for_seconds >= stream_watchdog_grace_period
+        and business_idle_seconds is not None
+        and business_idle_seconds >= message_stream_watchdog_timeout
+    )
+
+    if connection_state_value in {'connecting', 'reconnecting'}:
+        message_stream_status = 'recovering'
+        message_stream_ready = False
+    elif connection_state_value != 'connected' or not ws_transport_ready:
+        message_stream_status = 'connection_unready'
+        message_stream_ready = False
+    elif stream_stale_now:
+        message_stream_status = 'suspected_stale'
+        message_stream_ready = False
+    else:
+        message_stream_ready = True
+        if connected_for_seconds is not None and connected_for_seconds < stream_watchdog_grace_period and actual_business_activity_at is None:
+            message_stream_status = 'warming_up'
+        elif (
+            recent_watchdog_reconnect
+            and actual_business_activity_at is not None
+            and last_stream_watchdog_reconnect_at is not None
+            and actual_business_activity_at > last_stream_watchdog_reconnect_at
+        ):
+            message_stream_status = 'recovered'
+        elif actual_business_activity_at is not None:
+            message_stream_status = 'healthy'
+        else:
+            message_stream_status = 'watching'
+
+    business_note = (
+        f"最近非心跳业务包：{_format_runtime_timestamp(actual_business_activity_at)}"
+        if actual_business_activity_at is not None else
+        "当前连接尚未收到非心跳业务包"
+    )
+    sync_note = (
+        f"最近同步包：{_format_runtime_timestamp(last_sync_package_at)}"
+        if last_sync_package_at is not None else
+        "当前连接尚未收到同步包"
+    )
+    user_chat_note = (
+        f"最近真实买家消息：{_format_runtime_timestamp(last_user_chat_at)}"
+        if last_user_chat_at is not None else
+        "当前连接尚未收到真实买家消息"
+    )
+    message_stream_note_parts = [business_note]
+    if message_stream_status == 'suspected_stale':
+        message_stream_note_parts.extend([sync_note, user_chat_note])
+    elif recent_watchdog_reconnect and last_stream_watchdog_reconnect_at is not None:
+        message_stream_note_parts.append(
+            f"最近一次假在线重连：{_format_runtime_timestamp(last_stream_watchdog_reconnect_at)}"
+        )
+        if actual_business_activity_at is None:
+            message_stream_note_parts.append(sync_note)
+    else:
+        message_stream_note_parts.append(sync_note)
+    message_stream_note = ' · '.join(message_stream_note_parts)
+
     runtime_status.update({
         'instance_exists': True,
         'running': True,
@@ -2641,6 +2743,9 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'ws_ready': ws_ready,
         'session_ready': session_ready,
         'has_current_token': token_ready,
+        'message_stream_ready': message_stream_ready,
+        'message_stream_status': message_stream_status,
+        'message_stream_note': message_stream_note,
         'token_cached': token_cached,
         'token_refresh_status': token_refresh_status,
         'token_refresh_error_message': getattr(live_instance, 'last_token_refresh_error_message', None),
@@ -2662,6 +2767,18 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'last_heartbeat_sent_at_display': _format_runtime_timestamp(heartbeat_sent_at),
         'last_heartbeat_sent_age_seconds': _get_runtime_age_seconds(heartbeat_sent_at),
         'ws_transport_ready': ws_transport_ready,
+        'last_business_activity_at': actual_business_activity_at,
+        'last_business_activity_at_display': _format_runtime_timestamp(actual_business_activity_at),
+        'last_business_activity_age_seconds': _get_runtime_age_seconds(actual_business_activity_at),
+        'last_sync_package_at': last_sync_package_at,
+        'last_sync_package_at_display': _format_runtime_timestamp(last_sync_package_at),
+        'last_sync_package_age_seconds': _get_runtime_age_seconds(last_sync_package_at),
+        'last_user_chat_at': last_user_chat_at,
+        'last_user_chat_at_display': _format_runtime_timestamp(last_user_chat_at),
+        'last_user_chat_age_seconds': _get_runtime_age_seconds(last_user_chat_at),
+        'last_stream_watchdog_reconnect_at': last_stream_watchdog_reconnect_at,
+        'last_stream_watchdog_reconnect_at_display': _format_runtime_timestamp(last_stream_watchdog_reconnect_at),
+        'last_stream_watchdog_reconnect_age_seconds': _get_runtime_age_seconds(last_stream_watchdog_reconnect_at),
         'last_message_received_at': last_message_received_at,
         'last_message_received_at_display': _format_runtime_timestamp(last_message_received_at),
         'last_message_age_seconds': _get_runtime_age_seconds(last_message_received_at),
