@@ -9,11 +9,16 @@ let editCookieId = '';
 let authToken = localStorage.getItem('auth_token');
 let dashboardData = {
     accounts: [],
-    totalKeywords: 0
+    totalKeywords: 0,
+    totalItems: 0
 };
 let pendingAccountManagementFocusId = '';
 let aboutDiagnosticsAccounts = [];
 let aboutDiagnosticsInitialized = false;
+let dashboardRuntimeRetryTimer = null;
+let aboutRuntimeRetryTimer = null;
+let lastDashboardRuntimeRetryAt = 0;
+let lastAboutRuntimeRetryAt = 0;
 const DASHBOARD_ANNOUNCEMENT_DISMISS_PREFIX = 'dashboard_announcement_dismissed_';
 let dashboardAnnouncementState = {
     current: null,
@@ -175,6 +180,16 @@ function showSection(sectionName) {
         button.textContent = '开启自动刷新';
         if (icon) icon.className = 'bi bi-play-circle me-1';
     }
+    }
+
+    if (sectionName !== 'dashboard' && dashboardRuntimeRetryTimer) {
+        clearTimeout(dashboardRuntimeRetryTimer);
+        dashboardRuntimeRetryTimer = null;
+    }
+
+    if (sectionName !== 'accounts' && aboutRuntimeRetryTimer) {
+        clearTimeout(aboutRuntimeRetryTimer);
+        aboutRuntimeRetryTimer = null;
     }
 }
 
@@ -632,11 +647,175 @@ function renderDashboardAccountMetric(label, value, tone = 'off') {
     `;
 }
 
+function isRuntimeStatusHealthy(runtimeStatus) {
+    return Boolean(
+        runtimeStatus?.running
+        && runtimeStatus.ws_ready
+        && runtimeStatus.session_ready
+        && runtimeStatus.has_current_token
+        && runtimeStatus.message_stream_ready
+    );
+}
+
+function getRuntimeStatusRecentAnchor(runtimeStatus) {
+    const normalizedRuntimeStatus = runtimeStatus || {};
+    const timestampKeys = [
+        'state_last_changed_at',
+        'last_successful_connection_at',
+        'last_heartbeat_response_at',
+        'session_keepalive_at',
+        'token_last_refreshed_at',
+        'last_message_received_at',
+    ];
+
+    const timestamps = timestampKeys
+        .map(key => Number(normalizedRuntimeStatus[key] || 0))
+        .filter(value => Number.isFinite(value) && value > 0);
+
+    return timestamps.length ? Math.max(...timestamps) : 0;
+}
+
+function shouldAutoRetryRuntimeStatus(runtimeStatus) {
+    if (!runtimeStatus?.running) {
+        return false;
+    }
+
+    const connectionState = String(runtimeStatus.connection_state || '').trim();
+    if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+        return true;
+    }
+
+    if (isRuntimeStatusHealthy(runtimeStatus)) {
+        return false;
+    }
+
+    const recentAnchor = getRuntimeStatusRecentAnchor(runtimeStatus);
+    if (!recentAnchor) {
+        return false;
+    }
+
+    return ((Date.now() / 1000) - recentAnchor) <= 90;
+}
+
+function getMessageStreamRuntimeDisplay(runtimeStatus) {
+    const normalizedRuntimeStatus = runtimeStatus || {};
+    const explicitStatus = String(normalizedRuntimeStatus.message_stream_status || '').trim();
+    const explicitNote = String(normalizedRuntimeStatus.message_stream_note || '').trim();
+    const connectionState = String(normalizedRuntimeStatus.connection_state || '').trim();
+
+    let status = explicitStatus;
+    if (!status) {
+        if (!normalizedRuntimeStatus.running) {
+            status = 'not_running';
+        } else if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+            status = 'recovering';
+        } else if (connectionState !== 'connected' || normalizedRuntimeStatus.ws_ready === false) {
+            status = 'connection_unready';
+        } else if (normalizedRuntimeStatus.message_stream_ready) {
+            status = 'watching';
+        } else {
+            status = 'connection_unready';
+        }
+    }
+
+    let note = explicitNote;
+    if (!note) {
+        if (!normalizedRuntimeStatus.running) {
+            note = '账号实例未启动，业务消息流尚未建立';
+        } else if (status === 'recovering') {
+            note = '连接正在恢复，业务消息流状态将在重连稳定后更新';
+        } else if (status === 'connection_unready') {
+            note = '连接未就绪，业务消息流状态待 WebSocket 恢复后更新';
+        } else if (status === 'watching') {
+            note = '当前连接尚未收到非心跳业务包';
+        } else {
+            note = '业务消息流状态等待更多运行时数据';
+        }
+    }
+
+    return { status, note };
+}
+
+function scheduleDashboardRuntimeAutoRetry(accounts) {
+    if (dashboardRuntimeRetryTimer) {
+        clearTimeout(dashboardRuntimeRetryTimer);
+        dashboardRuntimeRetryTimer = null;
+    }
+
+    if (!document.getElementById('dashboard-section')?.classList.contains('active')) {
+        return;
+    }
+
+    if (!Array.isArray(accounts) || !accounts.some(account => shouldAutoRetryRuntimeStatus(account.runtime_status))) {
+        return;
+    }
+
+    if (Date.now() - lastDashboardRuntimeRetryAt < 15000) {
+        return;
+    }
+
+    const hasTransientState = accounts.some(account => {
+        const connectionState = String(account?.runtime_status?.connection_state || '').trim();
+        return connectionState === 'connecting' || connectionState === 'reconnecting';
+    });
+    const delay = hasTransientState ? 3500 : 5000;
+
+    dashboardRuntimeRetryTimer = setTimeout(() => {
+        dashboardRuntimeRetryTimer = null;
+        if (!document.getElementById('dashboard-section')?.classList.contains('active')) {
+            return;
+        }
+        lastDashboardRuntimeRetryAt = Date.now();
+        refreshDashboardRuntimeSnapshots();
+    }, delay);
+}
+
+function scheduleAboutRuntimeAutoRetry(accountId, runtimeStatus) {
+    if (aboutRuntimeRetryTimer) {
+        clearTimeout(aboutRuntimeRetryTimer);
+        aboutRuntimeRetryTimer = null;
+    }
+
+    const normalizedAccountId = String(accountId || '').trim();
+    if (!normalizedAccountId) {
+        return;
+    }
+
+    if (!document.getElementById('accounts-section')?.classList.contains('active')) {
+        return;
+    }
+
+    if (!shouldAutoRetryRuntimeStatus(runtimeStatus)) {
+        return;
+    }
+
+    if (Date.now() - lastAboutRuntimeRetryAt < 12000) {
+        return;
+    }
+
+    const connectionState = String(runtimeStatus?.connection_state || '').trim();
+    const delay = (connectionState === 'connecting' || connectionState === 'reconnecting') ? 3000 : 5000;
+
+    aboutRuntimeRetryTimer = setTimeout(() => {
+        aboutRuntimeRetryTimer = null;
+        if (!document.getElementById('accounts-section')?.classList.contains('active')) {
+            return;
+        }
+        if (getAboutSelectedAccountId() !== normalizedAccountId) {
+            return;
+        }
+        lastAboutRuntimeRetryAt = Date.now();
+        loadAboutRuntimeStatus(normalizedAccountId);
+    }, delay);
+}
+
 function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const normalizedRuntimeStatus = runtimeStatus || {};
     const connectionState = normalizedRuntimeStatus.connection_state || 'not_running';
     const keepaliveDisplayStatus = normalizedRuntimeStatus.session_keepalive_display_status || normalizedRuntimeStatus.session_keepalive_status || '';
     const tokenStatus = normalizedRuntimeStatus.token_refresh_status || '';
+    const messageStreamDisplay = getMessageStreamRuntimeDisplay(normalizedRuntimeStatus);
+    const messageStreamStatus = messageStreamDisplay.status;
 
     const connectionText = getAboutStatusText('connection', connectionState) || '未运行';
     const connectionTone = getAboutStatusVariant('connection', connectionState);
@@ -652,12 +831,13 @@ function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const tokenTone = tokenStatus
         ? getAboutStatusVariant('token', tokenStatus)
         : 'secondary';
-    const runningHealthy = Boolean(
-        normalizedRuntimeStatus.running
-        && normalizedRuntimeStatus.ws_ready
-        && normalizedRuntimeStatus.session_ready
-        && normalizedRuntimeStatus.has_current_token
-    );
+    const messageStreamText = messageStreamStatus
+        ? (getAboutStatusText('stream', messageStreamStatus) || messageStreamStatus)
+        : (normalizedRuntimeStatus.running ? '观察中' : '未运行');
+    const messageStreamTone = messageStreamStatus
+        ? getAboutStatusVariant('stream', messageStreamStatus)
+        : 'secondary';
+    const runningHealthy = isRuntimeStatusHealthy(normalizedRuntimeStatus);
     const summaryText = !normalizedRuntimeStatus.running
         ? '未运行'
         : (runningHealthy ? '运行正常' : '部分异常');
@@ -667,7 +847,8 @@ function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const items = [
         { label: '连接', text: connectionText, tone: connectionTone },
         { label: '保活', text: keepaliveText, tone: keepaliveTone },
-        { label: 'Token', text: tokenText, tone: tokenTone }
+        { label: 'Token', text: tokenText, tone: tokenTone },
+        { label: '消息流', text: messageStreamText, tone: messageStreamTone }
     ];
 
     return `
@@ -868,6 +1049,7 @@ async function loadDashboard() {
 
         // 加载商品总数
         const totalItems = await loadItemsCount();
+        dashboardData.totalItems = totalItems;
 
         // 加载订单看板数据
         const orderMetrics = await loadOrderDashboardMetrics();
@@ -880,6 +1062,7 @@ async function loadDashboard() {
 
         // 更新仪表盘显示
         renderDashboardAccountOverview(accountsWithKeywords, totalItems);
+        scheduleDashboardRuntimeAutoRetry(accountsWithKeywords);
         await loadDashboardDeliveryLogs();
     }
     } catch (error) {
@@ -887,6 +1070,35 @@ async function loadDashboard() {
     showToast('加载仪表盘数据失败', 'danger');
     } finally {
     toggleLoading(false);
+    }
+}
+
+async function refreshDashboardRuntimeSnapshots() {
+    if (!dashboardData.accounts.length) {
+        return;
+    }
+
+    try {
+        const cookieDetails = await fetchJSON(`${apiBase}/cookies/details`);
+        const runtimeStatusMap = new Map(
+            (Array.isArray(cookieDetails) ? cookieDetails : []).map(cookie => [String(cookie.id), cookie.runtime_status || null])
+        );
+
+        dashboardData.accounts = dashboardData.accounts.map(account => {
+            const accountId = String(account.id || '');
+            if (!runtimeStatusMap.has(accountId)) {
+                return account;
+            }
+            return {
+                ...account,
+                runtime_status: runtimeStatusMap.get(accountId),
+            };
+        });
+
+        renderDashboardAccountOverview(dashboardData.accounts, dashboardData.totalItems || 0);
+        scheduleDashboardRuntimeAutoRetry(dashboardData.accounts);
+    } catch (error) {
+        console.error('刷新仪表盘运行态失败:', error);
     }
 }
 
@@ -3176,6 +3388,16 @@ function getAboutStatusText(type, value) {
             token_missing: '无 Token',
             failed: '失败',
         },
+        stream: {
+            healthy: '正常',
+            recovered: '已恢复',
+            warming_up: '预热中',
+            watching: '观察中',
+            recovering: '恢复中',
+            suspected_stale: '疑似停滞',
+            connection_unready: '连接未就绪',
+            not_running: '未运行',
+        },
     };
 
     return maps[type]?.[normalized] || normalized;
@@ -3193,6 +3415,14 @@ function getAboutStatusVariant(type, value) {
         if (normalized === 'failed') return 'danger';
         if (normalized === 'not_running' || normalized === 'disconnected' || normalized === 'closed') return 'secondary';
         return 'info';
+    }
+
+    if (type === 'stream') {
+        if (normalized === 'healthy' || normalized === 'recovered') return 'success';
+        if (normalized === 'warming_up' || normalized === 'watching' || normalized === 'recovering') return 'info';
+        if (normalized === 'suspected_stale') return 'warning';
+        if (normalized === 'connection_unready' || normalized === 'not_running') return 'secondary';
+        return 'secondary';
     }
 
     if (normalized === 'success' || normalized === 'recovered') return 'success';
@@ -3243,9 +3473,40 @@ function buildAboutRuntimeMetaItem(label, value) {
 }
 
 function buildAboutReadinessValue(items) {
+    const normalizedItems = Array.isArray(items) ? items : [];
+    const totalCount = normalizedItems.length;
+    const readyCount = normalizedItems.filter(item => item.ready).length;
+    const progressPercent = totalCount
+        ? Math.max(0, Math.min(100, Math.round((readyCount / totalCount) * 100)))
+        : 0;
+    const pendingLabels = normalizedItems
+        .filter(item => !item.ready)
+        .map(item => item.label);
+
+    let summaryNote = '暂无链路状态';
+    if (totalCount > 0 && pendingLabels.length === 0) {
+        summaryNote = '四条关键链路均已就绪';
+    } else if (totalCount > 0 && pendingLabels.length === totalCount) {
+        summaryNote = '四条关键链路均未就绪';
+    } else if (pendingLabels.length > 0) {
+        summaryNote = `待处理：${pendingLabels.join(' / ')}`;
+    }
+
     return `
-        <div class="account-diagnostics-readiness-list">
-            ${items.map(item => `
+        <div class="account-diagnostics-readiness-summary">
+            <div class="account-diagnostics-readiness-hero">
+                <div class="account-diagnostics-readiness-ratio">
+                    <span class="account-diagnostics-readiness-ratio-current">${readyCount}</span>
+                    <span class="account-diagnostics-readiness-ratio-total">/ ${totalCount}</span>
+                </div>
+                <div class="account-diagnostics-readiness-caption">关键链路已就绪</div>
+            </div>
+            <div class="account-diagnostics-readiness-progress" aria-hidden="true">
+                <span class="account-diagnostics-readiness-progress-bar" style="width: ${progressPercent}%"></span>
+            </div>
+            <div class="account-diagnostics-readiness-percent">${progressPercent}% 就绪</div>
+            <div class="account-diagnostics-readiness-list">
+                ${normalizedItems.map(item => `
                 <span class="account-diagnostics-readiness-chip ${item.ready ? 'is-ready' : 'is-pending'}">
                     <span class="account-diagnostics-readiness-name-wrap">
                         <span class="account-diagnostics-readiness-dot"></span>
@@ -3253,7 +3514,9 @@ function buildAboutReadinessValue(items) {
                     </span>
                     <span class="account-diagnostics-readiness-state">${item.ready ? '已就绪' : '未就绪'}</span>
                 </span>
-            `).join('')}
+                `).join('')}
+            </div>
+            <div class="account-diagnostics-readiness-summary-note">${escapeHtml(summaryNote)}</div>
         </div>
     `;
 }
@@ -3328,7 +3591,7 @@ function getAboutRuntimeOverview(runtimeStatus, readinessCount = 0) {
         };
     }
 
-    if (!runtimeStatus?.ws_ready || !runtimeStatus?.session_ready || !runtimeStatus?.has_current_token) {
+    if (!runtimeStatus?.ws_ready || !runtimeStatus?.session_ready || !runtimeStatus?.has_current_token || !runtimeStatus?.message_stream_ready) {
         return {
             tone: 'warning',
             title: `${readinessCount} / 4 关键链路已就绪`,
@@ -3339,7 +3602,7 @@ function getAboutRuntimeOverview(runtimeStatus, readinessCount = 0) {
     return {
         tone: 'success',
         title: '链路稳定可用',
-        note: '连接、轻保活与 Token 三条主信号都处于正常状态。',
+        note: '连接、轻保活、Token 与业务消息流四条主信号都处于正常状态。',
     };
 }
 
@@ -3372,19 +3635,23 @@ function renderAboutRuntimeStatus(runtimeStatus) {
         runtimeStatus.state_last_changed_at_display,
         runtimeStatus.state_last_changed_at
     );
+    const messageStreamDisplay = getMessageStreamRuntimeDisplay(runtimeStatus);
+    const messageStreamStatus = messageStreamDisplay.status;
     const readinessItems = [
         { label: '实例', ready: !!runtimeStatus.running },
         { label: 'WS', ready: !!runtimeStatus.ws_ready },
         { label: 'Session', ready: !!runtimeStatus.session_ready },
         { label: 'Token', ready: !!runtimeStatus.has_current_token },
+        { label: '业务流', ready: !!runtimeStatus.message_stream_ready },
     ];
     const readinessSignalItems = readinessItems.slice(1);
-    const readinessCount = readinessItems.filter(item => item.ready).length;
-    const overview = getAboutRuntimeOverview(runtimeStatus, readinessCount);
+    const readinessSignalCount = readinessSignalItems.filter(item => item.ready).length;
+    const overview = getAboutRuntimeOverview(runtimeStatus, readinessSignalCount);
     const connectionTone = getAboutStatusVariant('connection', runtimeStatus.connection_state);
     const keepaliveDisplayStatus = runtimeStatus.session_keepalive_display_status || runtimeStatus.session_keepalive_status;
     const keepaliveTone = getAboutStatusVariant('keepalive', keepaliveDisplayStatus);
     const tokenTone = getAboutStatusVariant('token', runtimeStatus.token_refresh_status);
+    const messageStreamTone = getAboutStatusVariant('stream', messageStreamStatus);
     const readinessTone = readinessSignalItems.every(item => item.ready)
         ? 'success'
         : readinessSignalItems.some(item => item.ready)
@@ -3397,45 +3664,59 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                 <div class="account-diagnostics-status-note-title">${escapeHtml(overview.title)}</div>
                 <div class="account-diagnostics-status-note-text">${escapeHtml(overview.note)}</div>
             </div>
-            <div class="account-diagnostics-status-grid">
-                ${buildAboutRuntimeStatusItem({
-                    label: '连接状态',
-                    value: buildAboutStatusBadge('connection', runtimeStatus.connection_state),
-                    note: `最近连接成功：${lastConnectionDisplay}`,
-                    tone: connectionTone,
-                    richValue: true,
-                    accent: 'connection',
-                    icon: 'hdd-network',
-                })}
-                ${buildAboutRuntimeStatusItem({
-                    label: '轻保活状态',
-                    value: buildAboutStatusBadge('keepalive', keepaliveDisplayStatus),
-                    note: runtimeStatus.session_keepalive_display_note
-                        ? `最近执行：${keepaliveDisplay} · ${runtimeStatus.session_keepalive_display_note}`
-                        : `最近执行：${keepaliveDisplay}`,
-                    tone: keepaliveTone,
-                    richValue: true,
-                    accent: 'keepalive',
-                    icon: 'heart-pulse',
-                })}
-                ${buildAboutRuntimeStatusItem({
-                    label: 'Token 刷新状态',
-                    value: buildAboutStatusBadge('token', runtimeStatus.token_refresh_status),
-                    note: `最近刷新：${tokenRefreshDisplay}`,
-                    tone: tokenTone,
-                    richValue: true,
-                    accent: 'token',
-                    icon: 'key',
-                })}
-                ${buildAboutRuntimeStatusItem({
-                    label: '链路就绪情况',
-                    value: buildAboutReadinessValue(readinessSignalItems),
-                    note: `${readinessSignalItems.filter(item => item.ready).length} / 3 链路已就绪`,
-                    tone: readinessTone,
-                    richValue: true,
-                    accent: 'readiness',
-                    icon: 'diagram-3',
-                })}
+            <div class="account-diagnostics-status-body">
+                <div class="account-diagnostics-status-primary">
+                    <div class="account-diagnostics-status-grid">
+                        ${buildAboutRuntimeStatusItem({
+                            label: '连接状态',
+                            value: buildAboutStatusBadge('connection', runtimeStatus.connection_state),
+                            note: `最近连接成功：${lastConnectionDisplay}`,
+                            tone: connectionTone,
+                            richValue: true,
+                            accent: 'connection',
+                            icon: 'hdd-network',
+                        })}
+                        ${buildAboutRuntimeStatusItem({
+                            label: '轻保活状态',
+                            value: buildAboutStatusBadge('keepalive', keepaliveDisplayStatus),
+                            note: runtimeStatus.session_keepalive_display_note
+                                ? `最近执行：${keepaliveDisplay} · ${runtimeStatus.session_keepalive_display_note}`
+                                : `最近执行：${keepaliveDisplay}`,
+                            tone: keepaliveTone,
+                            richValue: true,
+                            accent: 'keepalive',
+                            icon: 'heart-pulse',
+                        })}
+                        ${buildAboutRuntimeStatusItem({
+                            label: 'Token 刷新状态',
+                            value: buildAboutStatusBadge('token', runtimeStatus.token_refresh_status),
+                            note: `最近刷新：${tokenRefreshDisplay}`,
+                            tone: tokenTone,
+                            richValue: true,
+                            accent: 'token',
+                            icon: 'key',
+                        })}
+                        ${buildAboutRuntimeStatusItem({
+                            label: '业务消息流',
+                            value: buildAboutStatusBadge('stream', messageStreamStatus),
+                            note: messageStreamDisplay.note,
+                            tone: messageStreamTone,
+                            richValue: true,
+                            accent: 'readiness',
+                            icon: 'broadcast-pin',
+                        })}
+                    </div>
+                </div>
+                <div class="account-diagnostics-status-sidebar">
+                    ${buildAboutRuntimeStatusItem({
+                        label: '链路就绪情况',
+                        value: buildAboutReadinessValue(readinessSignalItems),
+                        tone: readinessTone,
+                        richValue: true,
+                        accent: 'readiness',
+                        icon: 'diagram-3',
+                    })}
+                </div>
             </div>
             <div class="account-diagnostics-status-meta">
                 ${buildAboutRuntimeMetaItem('最近收到消息', lastMessageDisplay)}
@@ -3581,6 +3862,7 @@ async function loadAboutRuntimeStatus(accountId = '') {
             renderAboutAccountMeta(targetAccount);
         }
         renderAboutRuntimeStatus(runtimeStatus);
+        scheduleAboutRuntimeAutoRetry(normalizedAccountId, runtimeStatus);
     } catch (error) {
         console.error('加载账号运行态失败:', error);
     }
@@ -17426,7 +17708,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.9.0';
+const DEFAULT_VERSION = 'v1.9.2';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -17537,9 +17819,29 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.9.0',
+    version: 'v1.9.2',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.9.2',
+            date: '2026-04-10',
+            updates: [
+                '【修复】运行态总览统一按 WS / Session / Token / 业务流 四条主链路统计，避免出现 1 / 5 与 0 / 4 混用',
+                '【修复】运行态优先读取账号真实活跃实例，临时 XianyuLive 实例不再注册到全局实例表，减少业务消息流误判未就绪',
+                '【优化】账号详情运行态总览调整为左侧四个状态卡、右侧链路就绪摘要卡，桌面端信息分区更清晰',
+                '【优化】业务消息流补充连接未就绪与恢复中的兜底展示，运行态短时异常时前端自动重试刷新更平滑'
+            ]
+        },
+        {
+            version: 'v1.9.1',
+            date: '2026-04-10',
+            updates: [
+                '【新功能】新增业务消息流看门狗，区分心跳包与真实业务包，长时间只有心跳时会主动关闭旧 WebSocket 并触发重连',
+                '【新功能】账号运行态新增消息流诊断字段，补充最近非心跳业务包、同步包、真实买家消息与假在线重连时间，便于识别“连接已通但消息停滞”',
+                '【优化】仪表盘账号卡片和账号详情页新增“消息流”状态，并将链路就绪判断扩展到业务消息流',
+                '【优化】前端对连接中、重连中和短时异常状态增加自动重试刷新，减少运行态展示滞后'
+            ]
+        },
         {
             version: 'v1.9.0',
             date: '2026-04-08',

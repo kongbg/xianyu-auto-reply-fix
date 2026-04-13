@@ -26,7 +26,7 @@ from config import (
 # from app.logging_config import setup_logging  # 已移除，模块不存在
 import sys
 import aiohttp
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple
 from db_manager import db_manager
 from utils.notification_dispatcher import (
@@ -922,11 +922,158 @@ class XianyuLive:
                 # 如果收到取消信号，立即抛出
                 raise
 
+    def _reset_stream_activity_state(self, connected_at: Optional[float] = None):
+        """重置当前连接的消息流活性状态。"""
+        now = connected_at or time.time()
+        self.last_non_heartbeat_message_time = now
+        self.last_sync_package_time = 0
+        self.last_user_chat_time = 0
+        self.last_heartbeat_response = 0
+        self.last_sent_heartbeat_mid = None
+        self.pending_heartbeat_mids.clear()
+        self.last_stream_watchdog_reconnect_time = 0
+
+    def _mark_non_heartbeat_message(self, received_at: Optional[float] = None, *, is_sync_package: bool = False):
+        """记录最近一次非心跳业务包时间。"""
+        now = received_at or time.time()
+        self.last_non_heartbeat_message_time = now
+        if is_sync_package:
+            self.last_sync_package_time = now
+        if self.stream_watchdog_trigger_times:
+            self.stream_watchdog_trigger_times.clear()
+
+    async def _force_websocket_reconnect(self, reason: str) -> bool:
+        """主动关闭当前WebSocket，让主循环重新建立业务流连接。"""
+        ws = self.ws
+        if not ws:
+            logger.info(f"【{self.cookie_id}】{reason}，但当前没有活跃的WebSocket连接")
+            return False
+
+        if getattr(ws, "closed", False):
+            logger.info(f"【{self.cookie_id}】{reason}，但当前WebSocket已关闭，等待主循环重连")
+            return False
+
+        self._set_connection_state(ConnectionState.RECONNECTING, reason)
+        logger.warning(f"【{self.cookie_id}】{reason}，主动关闭当前WebSocket触发重连")
+        try:
+            await asyncio.wait_for(ws.close(), timeout=2.0)
+            logger.warning(f"【{self.cookie_id}】当前WebSocket已关闭，主循环将使用最新状态重新连接")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"【{self.cookie_id}】主动关闭WebSocket超时，等待主循环自行回收连接")
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】主动关闭WebSocket失败: {self._safe_str(e)}")
+        return False
+
+    def _record_message_stream_watchdog_trigger(self, occurred_at: Optional[float] = None) -> int:
+        """记录业务流看门狗触发次数，便于识别重复假在线。"""
+        now = occurred_at or time.time()
+        window_seconds = max(60, int(self.message_stream_notification_window or 0))
+        while self.stream_watchdog_trigger_times and now - self.stream_watchdog_trigger_times[0] > window_seconds:
+            self.stream_watchdog_trigger_times.popleft()
+        self.stream_watchdog_trigger_times.append(now)
+        return len(self.stream_watchdog_trigger_times)
+
+    async def _maybe_notify_message_stream_stale(self, occurred_at: float, connected_for: float, business_idle: float):
+        """仅在短时间重复触发时发送业务流假在线通知，避免单次波动刷屏。"""
+        trigger_count = self._record_message_stream_watchdog_trigger(occurred_at)
+        if trigger_count < 2:
+            return
+
+        window_minutes = max(1, int(self.message_stream_notification_window // 60))
+        sync_desc = (
+            f"最近同步包距今{(occurred_at - self.last_sync_package_time):.0f}秒"
+            if self.last_sync_package_time else
+            "当前连接尚未收到同步包"
+        )
+        user_chat_desc = (
+            f"最近真实买家消息距今{(occurred_at - self.last_user_chat_time):.0f}秒"
+            if self.last_user_chat_time else
+            "当前连接尚未收到真实买家消息"
+        )
+        notification_message = (
+            f"业务消息流疑似假在线，最近{window_minutes}分钟内已连续触发{trigger_count}次自动重连。"
+            f"已连接{connected_for:.0f}秒，最近非心跳业务包距今{business_idle:.0f}秒，"
+            f"{sync_desc}，{user_chat_desc}"
+        )
+        await self.send_token_refresh_notification(notification_message, "message_stream_stale")
+
+    async def message_stream_watchdog_loop(self):
+        """检测“只有心跳、没有业务包”的假在线状态。"""
+        heartbeat_stale_timeout = max(self.heartbeat_timeout * 2, self.heartbeat_interval * 3)
+        try:
+            while True:
+                try:
+                    from cookie_manager import manager as cookie_manager
+                    if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
+                        logger.info(f"【{self.cookie_id}】账号已禁用，停止业务流看门狗")
+                        break
+
+                    await self._interruptible_sleep(self.stream_watchdog_check_interval)
+
+                    ws = self.ws
+                    if not ws or getattr(ws, "closed", False):
+                        continue
+
+                    if not self.last_successful_connection:
+                        continue
+
+                    now = time.time()
+                    connected_for = now - self.last_successful_connection
+                    if connected_for < self.stream_watchdog_grace_period:
+                        continue
+
+                    if not self.last_heartbeat_response:
+                        continue
+
+                    heartbeat_age = now - self.last_heartbeat_response
+                    if heartbeat_age > heartbeat_stale_timeout:
+                        continue
+
+                    last_business_at = self.last_non_heartbeat_message_time or self.last_successful_connection
+                    business_idle = now - last_business_at
+                    if business_idle < self.message_stream_watchdog_timeout:
+                        continue
+
+                    if (
+                        self.last_stream_watchdog_reconnect_time
+                        and now - self.last_stream_watchdog_reconnect_time < self.message_stream_watchdog_timeout / 2
+                    ):
+                        continue
+
+                    self.last_stream_watchdog_reconnect_time = now
+                    if self.last_sync_package_time:
+                        sync_status = f"最近同步包距今{(now - self.last_sync_package_time):.0f}秒"
+                    else:
+                        sync_status = "当前连接尚未收到同步包"
+                    if self.last_user_chat_time:
+                        user_chat_status = f"，最近真实买家消息距今{(now - self.last_user_chat_time):.0f}秒"
+                    else:
+                        user_chat_status = "，当前连接尚未收到真实买家消息"
+
+                    logger.warning(
+                        f"【{self.cookie_id}】检测到业务流疑似假在线: "
+                        f"已连接{connected_for:.0f}秒，最近非心跳业务包距今{business_idle:.0f}秒，{sync_status}{user_chat_status}"
+                    )
+                    await self._force_websocket_reconnect("业务消息流长时间只有心跳，疑似假在线")
+                    await self._maybe_notify_message_stream_stale(now, connected_for, business_idle)
+                except asyncio.CancelledError:
+                    logger.info(f"【{self.cookie_id}】业务流看门狗收到取消信号，准备退出")
+                    raise
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】业务流看门狗异常: {self._safe_str(e)}")
+                    await self._interruptible_sleep(30)
+        except asyncio.CancelledError:
+            logger.info(f"【{self.cookie_id}】业务流看门狗已取消，正在退出...")
+            raise
+        finally:
+            logger.info(f"【{self.cookie_id}】业务流看门狗已退出")
+
     def _reset_background_tasks(self):
         """直接重置后台任务引用，不等待取消（用于快速重连）
         
         注意：只重置心跳任务，因为只有心跳任务依赖WebSocket连接。
-        其他任务（Token刷新、清理、Cookie刷新）不依赖WebSocket，可以继续运行。
+        其他任务（会话保活、业务流看门狗、清理、Cookie刷新）不依赖WebSocket，可以继续运行。
         """
         logger.info(f"【{self.cookie_id}】准备重置后台任务引用（仅重置依赖WebSocket的任务）...")
         
@@ -958,6 +1105,9 @@ class XianyuLive:
         if self.cookie_refresh_task:
             status = "已完成" if self.cookie_refresh_task.done() else "运行中"
             other_tasks_status.append(f"Cookie刷新任务({status})")
+        if self.stream_watchdog_task:
+            status = "已完成" if self.stream_watchdog_task.done() else "运行中"
+            other_tasks_status.append(f"业务流看门狗({status})")
         
         if other_tasks_status:
             logger.info(f"【{self.cookie_id}】其他任务继续运行（不依赖WebSocket）: {', '.join(other_tasks_status)}")
@@ -996,6 +1146,12 @@ class XianyuLive:
                 else:
                     logger.debug(f"【{self.cookie_id}】Cookie刷新任务已完成，跳过")
             
+            if self.stream_watchdog_task:
+                if not self.stream_watchdog_task.done():
+                    tasks_to_cancel.append(("业务流看门狗", self.stream_watchdog_task))
+                else:
+                    logger.debug(f"【{self.cookie_id}】业务流看门狗已完成，跳过")
+            
             if not tasks_to_cancel:
                 logger.info(f"【{self.cookie_id}】没有后台任务需要取消（所有任务已完成或不存在）")
                 # 立即重置任务引用
@@ -1003,6 +1159,7 @@ class XianyuLive:
                 self.token_refresh_task = None
                 self.cleanup_task = None
                 self.cookie_refresh_task = None
+                self.stream_watchdog_task = None
                 return
             
             logger.info(f"【{self.cookie_id}】开始取消 {len(tasks_to_cancel)} 个未完成的后台任务...")
@@ -1137,6 +1294,7 @@ class XianyuLive:
             self.token_refresh_task = None
             self.cleanup_task = None
             self.cookie_refresh_task = None
+            self.stream_watchdog_task = None
             logger.info(f"【{self.cookie_id}】后台任务引用已全部重置")
 
     def _calculate_retry_delay(self, error_msg: str) -> int:
@@ -1314,7 +1472,7 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】清理日志文件时出错: {self._safe_str(e)}")
             return 0
 
-    def __init__(self, cookies_str=None, cookie_id: str = "default", user_id: int = None):
+    def __init__(self, cookies_str=None, cookie_id: str = "default", user_id: int = None, *, register_instance: bool = True):
         """初始化闲鱼直播类"""
         logger.info(f"【{cookie_id}】开始初始化XianyuLive...")
 
@@ -1330,6 +1488,7 @@ class XianyuLive:
         self.cookie_id = cookie_id  # 唯一账号标识
         self.cookies_str = cookies_str  # 保存原始cookie字符串
         self.user_id = user_id  # 保存用户ID，用于token刷新时保持正确的所有者关系
+        self.register_instance = bool(register_instance)
         self.base_url = WEBSOCKET_URL
 
         if 'unb' not in self.cookies:
@@ -1344,8 +1503,14 @@ class XianyuLive:
         self.heartbeat_timeout = HEARTBEAT_TIMEOUT
         self.last_heartbeat_time = 0
         self.last_heartbeat_response = 0
+        self.last_sent_heartbeat_mid = None
+        self.pending_heartbeat_mids = deque(maxlen=32)
         self.heartbeat_task = None
         self.ws = None
+        self.last_non_heartbeat_message_time = 0
+        self.last_sync_package_time = 0
+        self.last_user_chat_time = 0
+        self.last_stream_watchdog_reconnect_time = 0
 
         # Token刷新相关配置
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
@@ -1365,6 +1530,13 @@ class XianyuLive:
         self.last_init_failure_reason = None
         self.last_init_failure_type = None
         self.init_auth_failures = 0
+        self.stream_watchdog_task = None
+        self.stream_watchdog_check_interval = max(self.heartbeat_interval, 15)
+        self.stream_watchdog_grace_period = max(self.heartbeat_interval * 4, 120)
+        self.message_stream_watchdog_timeout = max(self.session_keepalive_interval * 3, 1800)
+        self.stream_watchdog_trigger_times = deque(maxlen=8)
+        self.message_stream_notification_window = max(self.message_stream_watchdog_timeout * 2, 3600)
+        self.message_stream_notification_cooldown = max(self.message_stream_watchdog_timeout, 1800)
 
         prewarmed_token_info = self.pop_auth_prewarmed_token(self.cookie_id)
         if prewarmed_token_info:
@@ -1502,8 +1674,9 @@ class XianyuLive:
         # 初始化订单状态处理器
         self._init_order_status_handler()
 
-        # 注册实例到类级别字典（用于API调用）
-        self._register_instance()
+        # 只有长期运行实例才进入全局实例表，避免临时实例污染运行态诊断
+        if self.register_instance:
+            self._register_instance()
 
     @property
     def message_debounce_delay(self):
@@ -8817,7 +8990,10 @@ class XianyuLive:
 
             # 为Token刷新异常通知使用特殊的3小时冷却时间
             # 基于错误消息内容判断是否为Token相关异常
-            if self._is_token_related_error(error_message):
+            if notification_type == "message_stream_stale":
+                cooldown_time = self.message_stream_notification_cooldown
+                cooldown_desc = f"{max(1, int(cooldown_time // 60))}分钟"
+            elif self._is_token_related_error(error_message):
                 cooldown_time = self.token_refresh_notification_cooldown
                 cooldown_desc = "3小时"
             else:
@@ -8916,7 +9092,10 @@ class XianyuLive:
                     self.last_notification_time[notification_key] = current_time
 
                 # 根据错误消息内容使用不同的冷却时间
-                if self._is_token_related_error(error_message):
+                if notification_type == "message_stream_stale":
+                    next_send_time = current_time + self.message_stream_notification_cooldown
+                    cooldown_desc = f"{max(1, int(self.message_stream_notification_cooldown // 60))}分钟"
+                elif self._is_token_related_error(error_message):
                     next_send_time = current_time + self.token_refresh_notification_cooldown
                     cooldown_desc = "3小时"
                 else:
@@ -10802,9 +10981,9 @@ class XianyuLive:
                             new_token = await self.refresh_token()
                             if new_token:
                                 self.last_session_keepalive_time = time.time()
-                                logger.info(f"【{self.cookie_id}】重型Token恢复成功，继续保持当前WebSocket连接")
-                                await self._interruptible_sleep(60)
-                                continue
+                                logger.info(f"【{self.cookie_id}】重型Token恢复成功，主动关闭旧WebSocket以使用新Token重连")
+                                await self._force_websocket_reconnect("重型Token恢复成功，准备使用新Token重连")
+                                break
 
                             last_refresh_status = getattr(self, 'last_token_refresh_status', None)
                             benign_refresh_statuses = ("skipped_cooldown", "restarted_after_cookie_refresh")
@@ -11070,17 +11249,20 @@ class XianyuLive:
         if ws.closed:
             raise ConnectionError("WebSocket连接已关闭，无法发送心跳")
         
+        heartbeat_mid = generate_mid()
         msg = {
             "lwp": "/!",
             "headers": {
-                "mid": generate_mid()
+                "mid": heartbeat_mid
             }
         }
         # 添加超时保护，避免在WebSocket关闭时阻塞
         try:
+            self.last_sent_heartbeat_mid = heartbeat_mid
+            self.pending_heartbeat_mids.append(heartbeat_mid)
             await asyncio.wait_for(ws.send(json.dumps(msg)), timeout=2.0)
             self.last_heartbeat_time = time.time()
-            logger.warning(f"【{self.cookie_id}】心跳包已发送")
+            logger.warning(f"【{self.cookie_id}】心跳包已发送 [ID:{heartbeat_mid}]")
         except asyncio.TimeoutError:
             raise ConnectionError("心跳发送超时，WebSocket可能已断开")
         except asyncio.CancelledError:
@@ -11141,10 +11323,30 @@ class XianyuLive:
     async def handle_heartbeat_response(self, message_data):
         """处理心跳响应"""
         try:
-            if message_data.get("code") == 200:
-                self.last_heartbeat_response = time.time()
-                logger.warning("心跳响应正常")
-                return True
+            if not isinstance(message_data, dict):
+                return False
+
+            if message_data.get("code") != 200:
+                return False
+
+            if self.is_sync_package(message_data):
+                return False
+
+            headers = message_data.get("headers")
+            if not isinstance(headers, dict):
+                return False
+
+            response_mid = str(headers.get("mid") or "")
+            if not response_mid or response_mid not in self.pending_heartbeat_mids:
+                return False
+
+            self.last_heartbeat_response = time.time()
+            try:
+                self.pending_heartbeat_mids.remove(response_mid)
+            except ValueError:
+                pass
+            logger.warning(f"【{self.cookie_id}】心跳响应正常 [ID:{response_mid}]")
+            return True
         except Exception as e:
             logger.error(f"处理心跳响应出错: {self._safe_str(e)}")
         return False
@@ -13738,6 +13940,8 @@ class XianyuLive:
                 )
             else:
                 logger.info(f"[{msg_time}] 【收到】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): {send_message}")
+                if message_route == 'user_chat':
+                    self.last_user_chat_time = time.time()
 
                 # 【优先处理】检查是否正在等待亦凡卡劵账号输入
                 async with self.yifan_account_lock:
@@ -14304,9 +14508,10 @@ class XianyuLive:
                             self._set_connection_state(ConnectionState.CONNECTED, "初始化完成，连接就绪")
                             self.connection_failures = 0
                             self.last_successful_connection = time.time()
+                            self._reset_stream_activity_state(self.last_successful_connection)
 
                             # 记录后台任务启动前的状态
-                            logger.warning(f"【{self.cookie_id}】准备启动后台任务 - 当前状态: heartbeat={self.heartbeat_task}, token_refresh={self.token_refresh_task}, cleanup={self.cleanup_task}, cookie_refresh={self.cookie_refresh_task}")
+                            logger.warning(f"【{self.cookie_id}】准备启动后台任务 - 当前状态: heartbeat={self.heartbeat_task}, token_refresh={self.token_refresh_task}, cleanup={self.cleanup_task}, cookie_refresh={self.cookie_refresh_task}, stream_watchdog={self.stream_watchdog_task}")
                             
                             # 如果存在心跳任务引用，先清理（心跳任务依赖WebSocket，必须重启）
                             if self.heartbeat_task:
@@ -14341,6 +14546,13 @@ class XianyuLive:
                             else:
                                 logger.info(f"【{self.cookie_id}】Cookie刷新任务已在运行，跳过启动")
 
+                            if not self.stream_watchdog_task or self.stream_watchdog_task.done():
+                                logger.info(f"【{self.cookie_id}】启动业务流看门狗任务...")
+                                self.stream_watchdog_task = asyncio.create_task(self.message_stream_watchdog_loop())
+                                tasks_started.append("业务流看门狗")
+                            else:
+                                logger.info(f"【{self.cookie_id}】业务流看门狗任务已在运行，跳过启动")
+
                             # 启动消息队列工作协程（高性能消息处理）
                             if self.message_queue_enabled:
                                 await self._start_message_queue_workers()
@@ -14349,7 +14561,7 @@ class XianyuLive:
                             # 记录所有后台任务状态
                             if tasks_started:
                                 logger.info(f"【{self.cookie_id}】✅ 新启动的任务: {', '.join(tasks_started)}")
-                            logger.info(f"【{self.cookie_id}】✅ 所有后台任务状态: 心跳(已启动), 会话保活({'运行中' if self.token_refresh_task and not self.token_refresh_task.done() else '已启动'}), 暂停清理({'运行中' if self.cleanup_task and not self.cleanup_task.done() else '已启动'}), Cookie刷新({'运行中' if self.cookie_refresh_task and not self.cookie_refresh_task.done() else '已启动'})")
+                            logger.info(f"【{self.cookie_id}】✅ 所有后台任务状态: 心跳(已启动), 会话保活({'运行中' if self.token_refresh_task and not self.token_refresh_task.done() else '已启动'}), 暂停清理({'运行中' if self.cleanup_task and not self.cleanup_task.done() else '已启动'}), Cookie刷新({'运行中' if self.cookie_refresh_task and not self.cookie_refresh_task.done() else '已启动'}), 业务流看门狗({'运行中' if self.stream_watchdog_task and not self.stream_watchdog_task.done() else '已启动'})")
                             
                             logger.info(f"【{self.cookie_id}】开始监听WebSocket消息...")
                             logger.info(f"【{self.cookie_id}】WebSocket连接状态正常，等待服务器消息...")
@@ -14380,6 +14592,9 @@ class XianyuLive:
                                     # 处理心跳响应（高优先级，直接处理）
                                     if await self.handle_heartbeat_response(message_data):
                                         continue
+
+                                    is_sync_package = self.is_sync_package(message_data)
+                                    self._mark_non_heartbeat_message(time.time(), is_sync_package=is_sync_package)
 
                                     # 处理其他消息
                                     # 使用高性能消息队列系统处理消息，解决消息阻塞问题
@@ -14599,6 +14814,7 @@ class XianyuLive:
                         self.token_refresh_task = None
                         self.cleanup_task = None
                         self.cookie_refresh_task = None
+                        self.stream_watchdog_task = None
                         logger.warning(f"【{self.cookie_id}】清理失败，已强制重置所有任务引用")
                         # 使用可中断的sleep，并定期输出日志
                         logger.info(f"【{self.cookie_id}】清理失败后开始等待 {retry_delay} 秒...")
@@ -14641,7 +14857,8 @@ class XianyuLive:
                 self.heartbeat_task and not self.heartbeat_task.done(),
                 self.token_refresh_task and not self.token_refresh_task.done(),
                 self.cleanup_task and not self.cleanup_task.done(),
-                self.cookie_refresh_task and not self.cookie_refresh_task.done()
+                self.cookie_refresh_task and not self.cookie_refresh_task.done(),
+                self.stream_watchdog_task and not self.stream_watchdog_task.done()
             ])
             
             if has_pending_tasks:
@@ -14662,6 +14879,7 @@ class XianyuLive:
                     self.token_refresh_task = None
                     self.cleanup_task = None
                     self.cookie_refresh_task = None
+                    self.stream_watchdog_task = None
             else:
                 logger.info(f"【{self.cookie_id}】所有后台任务已清理完成，跳过重复清理")
                 # 确保任务引用被重置
@@ -14669,6 +14887,7 @@ class XianyuLive:
                 self.token_refresh_task = None
                 self.cleanup_task = None
                 self.cookie_refresh_task = None
+                self.stream_watchdog_task = None
             
             # 清理所有后台任务
             if self.background_tasks:
